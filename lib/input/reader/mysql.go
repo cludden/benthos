@@ -22,7 +22,7 @@ import (
 // MySQLConfig contains configuration fields for the MySQL input type.
 type MySQLConfig struct {
 	Cache         string   `json:"cache" yaml:"cache"`
-	ConsumerID    string   `json:"consumer_id" yaml:"consumer_id"`
+	ConsumerID    uint32   `json:"consumer_id" yaml:"consumer_id"`
 	Databases     []string `json:"databases" yaml:"databases"`
 	Host          string   `json:"host" yaml:"host"`
 	KeyPrefix     string   `json:"key_prefix" yaml:"key_prefix"`
@@ -54,9 +54,9 @@ type MySQL struct {
 	synced bool
 	key    string
 
-	unAckMsgs        []*canal.RowsEvent
 	internalMessages chan *canal.RowsEvent
 	interruptChan    chan struct{}
+	failedMessage    *canal.RowsEvent
 	closed           chan error
 
 	conf  MySQLConfig
@@ -69,7 +69,7 @@ type MySQL struct {
 func NewMySQL(conf MySQLConfig, mgr types.Manager, log log.Modular, stats metrics.Type) (*MySQL, error) {
 	// create base reader
 	m := MySQL{
-		key:              fmt.Sprintf("%s%s", conf.KeyPrefix, conf.ConsumerID),
+		key:              fmt.Sprintf("%s%d", conf.KeyPrefix, conf.ConsumerID),
 		internalMessages: make(chan *canal.RowsEvent, conf.PrefetchCount),
 		interruptChan:    make(chan struct{}),
 		closed:           make(chan error),
@@ -147,6 +147,7 @@ func (m *MySQL) Acknowledge(err error) error {
 	if err != nil {
 		return err
 	}
+
 	m.Lock()
 	defer m.Unlock()
 	if m.synced == true {
@@ -382,16 +383,30 @@ func (m *MySQL) Read() (types.Message, error) {
 	log := m.pos.Log
 	m.RUnlock()
 
+	// check for failed message to retry, otherwise block until
+	// the next binlog row event is available
 	var e *canal.RowsEvent
-	select {
-	case e = <-m.internalMessages:
-	case <-m.interruptChan:
-		return nil, types.ErrTypeClosed
+	if m.failedMessage != nil {
+		m.Lock()
+		e = m.failedMessage
+		m.failedMessage = nil
+		m.Unlock()
+	} else {
+		select {
+		case e = <-m.internalMessages:
+		case <-m.interruptChan:
+			return nil, types.ErrTypeClosed
+		}
 	}
 
+	// parse the binlog row event, requeue it if there is an error
 	msg, err := m.parse(e, log)
 	if err != nil {
-		return nil, err
+		m.Lock()
+		m.failedMessage = e
+		m.Unlock()
+		m.log.Errorf("failed to parse binlog row event: %v", err)
+		return nil, types.ErrBadMessageBytes
 	}
 	return message.New([][]byte{msg}), nil
 }
@@ -425,7 +440,7 @@ type MySQLRowSummary struct {
 
 // mysqlPosition describes an individual reader's binlog position at a given point in time
 type mysqlPosition struct {
-	ConsumerID   string    `db:"consumer_id" dynamodbav:"consumer_id"`
+	ConsumerID   uint32    `db:"consumer_id" dynamodbav:"consumer_id"`
 	LastSyncedAt time.Time `db:"synced_at" dynamodbav:"sync_at"`
 	Log          string    `db:"log" dynamodbav:"log"`
 	Position     uint32    `db:"position" dynamodbav:"position"`
