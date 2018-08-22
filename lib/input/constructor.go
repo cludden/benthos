@@ -72,6 +72,7 @@ const (
 	TypeKafka         = "kafka"
 	TypeKafkaBalanced = "kafka_balanced"
 	TypeMQTT          = "mqtt"
+	TypeMySQL         = "mysql"
 	TypeNanomsg       = "nanomsg"
 	TypeNATS          = "nats"
 	TypeNATSStream    = "nats_stream"
@@ -102,6 +103,7 @@ type Config struct {
 	Kafka         reader.KafkaConfig         `json:"kafka" yaml:"kafka"`
 	KafkaBalanced reader.KafkaBalancedConfig `json:"kafka_balanced" yaml:"kafka_balanced"`
 	MQTT          reader.MQTTConfig          `json:"mqtt" yaml:"mqtt"`
+	MySQL         reader.MySQLConfig         `json:"mysql" yaml:"mysql"`
 	Nanomsg       reader.ScaleProtoConfig    `json:"nanomsg" yaml:"nanomsg"`
 	NATS          reader.NATSConfig          `json:"nats" yaml:"nats"`
 	NATSStream    reader.NATSStreamConfig    `json:"nats_stream" yaml:"nats_stream"`
@@ -132,6 +134,7 @@ func NewConfig() Config {
 		Kafka:         reader.NewKafkaConfig(),
 		KafkaBalanced: reader.NewKafkaBalancedConfig(),
 		MQTT:          reader.NewMQTTConfig(),
+		MySQL:         reader.NewMySQLConfig(),
 		Nanomsg:       reader.NewScaleProtoConfig(),
 		NATS:          reader.NewNATSConfig(),
 		NATSStream:    reader.NewNATSStreamConfig(),
