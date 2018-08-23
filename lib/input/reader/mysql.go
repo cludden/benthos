@@ -2,6 +2,7 @@ package reader
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -27,6 +28,7 @@ type MySQLConfig struct {
 	Host          string   `json:"host" yaml:"host"`
 	KeyPrefix     string   `json:"key_prefix" yaml:"key_prefix"`
 	Latest        bool     `json:"latest" yaml:"latest"`
+	MySQLDumpPath string   `json:"mysqldump_path" yaml:"mysqldump_path"`
 	Password      string   `json:"password" yaml:"password"`
 	PrefetchCount uint     `json:"prefetch_count" yaml:"prefetch_count"`
 	Port          uint32   `json:"port" yaml:"port"`
@@ -66,7 +68,7 @@ type MySQL struct {
 }
 
 // NewMySQL creates a new MySQL input type.
-func NewMySQL(conf MySQLConfig, mgr types.Manager, log log.Modular, stats metrics.Type) (*MySQL, error) {
+func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metrics.Type) (*MySQL, error) {
 	// create base reader
 	m := MySQL{
 		key:              fmt.Sprintf("%s%d", conf.KeyPrefix, conf.ConsumerID),
@@ -74,15 +76,10 @@ func NewMySQL(conf MySQLConfig, mgr types.Manager, log log.Modular, stats metric
 		interruptChan:    make(chan struct{}),
 		closed:           make(chan error),
 		conf:             conf,
+		cache:            cache,
 		stats:            stats,
 		log:              log.NewModule(".input.mysql"),
 	}
-
-	cache, err := mgr.GetCache(conf.Cache)
-	if err != nil {
-		return nil, err
-	}
-	m.cache = cache
 
 	// build binlog consumer config
 	c := canal.NewDefaultConfig()
@@ -90,6 +87,7 @@ func NewMySQL(conf MySQLConfig, mgr types.Manager, log log.Modular, stats metric
 	c.User = conf.Username
 	c.Password = conf.Password
 	c.Dump.DiscardErr = false
+	c.Dump.ExecutionPath = conf.MySQLDumpPath
 	c.Dump.SkipMasterData = false
 	if len(conf.Databases) == 1 && len(conf.Tables) > 0 {
 		c.Dump.TableDB = conf.Databases[0]
@@ -154,6 +152,7 @@ func (m *MySQL) Acknowledge(err error) error {
 		return nil
 	}
 
+	m.pos.LastSyncedAt = time.Now()
 	pos, err := json.Marshal(m.pos)
 	if err != nil {
 		return fmt.Errorf("error marshalling mysql position: %v", err)
@@ -263,7 +262,7 @@ func (m *MySQL) marshalRowSummary(table *schema.Table, row []interface{}) map[st
 }
 
 // parse a binlog event into a json byte slice
-func (m *MySQL) parse(e *canal.RowsEvent, log string) ([]byte, error) {
+func (m *MySQL) parse(e *canal.RowsEvent, log string) (*MysqlMessage, error) {
 	msg := MysqlMessage{
 		Row:       m.parseRowSummary(e),
 		Schema:    e.Table.Schema,
@@ -279,17 +278,13 @@ func (m *MySQL) parse(e *canal.RowsEvent, log string) ([]byte, error) {
 	msg.Key = keys
 
 	var id bytes.Buffer
-	fmt.Fprintf(&id, "%s:%d:%s:%s", log, e.Header.LogPos, msg.Schema, msg.Table)
+	fmt.Fprintf(&id, "%s:%d:%s:%s:", log, e.Header.LogPos, msg.Schema, msg.Table)
 	for _, v := range keys {
 		fmt.Fprintf(&id, "%v:", v)
 	}
 	msg.ID = strings.TrimSuffix(id.String(), ":")
 
-	marshalled, err := json.Marshal(msg)
-	if err != nil {
-		return nil, fmt.Errorf("unable to marshal mysql message: %v", err)
-	}
-	return marshalled, nil
+	return &msg, nil
 }
 
 // parseRowSummary parses the before and/or after row image
@@ -301,9 +296,9 @@ func (m *MySQL) parseRowSummary(e *canal.RowsEvent) MySQLRowSummary {
 		before = m.marshalRowSummary(e.Table, e.Rows[0])
 		after = m.marshalRowSummary(e.Table, e.Rows[1])
 	case canal.InsertAction:
-		before = m.marshalRowSummary(e.Table, e.Rows[0])
-	case canal.DeleteAction:
 		after = m.marshalRowSummary(e.Table, e.Rows[0])
+	case canal.DeleteAction:
+		before = m.marshalRowSummary(e.Table, e.Rows[0])
 	}
 	summary.After = after
 	summary.Before = before
@@ -400,7 +395,7 @@ func (m *MySQL) Read() (types.Message, error) {
 	}
 
 	// parse the binlog row event, requeue it if there is an error
-	msg, err := m.parse(e, log)
+	record, err := m.parse(e, log)
 	if err != nil {
 		m.Lock()
 		m.failedMessage = e
@@ -408,13 +403,24 @@ func (m *MySQL) Read() (types.Message, error) {
 		m.log.Errorf("failed to parse binlog row event: %v", err)
 		return nil, types.ErrBadMessageBytes
 	}
-	return message.New([][]byte{msg}), nil
+
+	var part message.Part
+	if err := part.SetJSON(record); err != nil {
+		return nil, err
+	}
+
+	msg := message.New(nil)
+	msg.Append(&part)
+	return msg, nil
 }
 
 // WaitForClose blocks until the MySQL input has closed down.
 func (m *MySQL) WaitForClose(timeout time.Duration) error {
 	m.canal.Close()
 	err := <-m.closed
+	if err.Error() == context.Canceled.Error() {
+		err = nil
+	}
 	return m.Acknowledge(err)
 }
 

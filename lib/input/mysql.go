@@ -41,7 +41,12 @@ Subscribe to a MySQL binary log.`,
 
 // NewMySQL creates a new NSQ input type.
 func NewMySQL(conf Config, mgr types.Manager, log log.Modular, stats metrics.Type) (Type, error) {
-	m, err := reader.NewMySQL(conf.MySQL, mgr, log, stats)
+	cache, err := mgr.GetCache(conf.MySQL.Cache)
+	if err != nil {
+		return nil, types.ErrCacheNotFound
+	}
+
+	m, err := reader.NewMySQL(conf.MySQL, cache, log, stats)
 	if err != nil {
 		return nil, err
 	}

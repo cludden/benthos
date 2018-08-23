@@ -23,7 +23,6 @@ package cache
 import (
 	"time"
 
-	"github.com/Jeffail/benthos/lib/input/reader"
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
 	"github.com/Jeffail/benthos/lib/types"
@@ -56,14 +55,22 @@ backing table has TTL enabled. Strong read consistency can be enabled using the
 
 // DynamoDBConfig contains config fields for the DynamoDB cache type.
 type DynamoDBConfig struct {
-	ConsistentRead bool                              `json:"consistent_read" yaml:"consistent_read"`
-	Credentials    reader.AmazonAWSCredentialsConfig `json:"credentials" yaml:"credentials"`
-	DataKey        string                            `json:"data_key" yaml:"data_key"`
-	HashKey        string                            `json:"hash_key" yaml:"hash_key"`
-	Region         string                            `json:"region" yaml:"region"`
-	Table          string                            `json:"table" yaml:"table"`
-	TTL            string                            `json:"ttl" yaml:"ttl"`
-	TTLKey         string                            `json:"ttl_key" yaml:"ttl_key"`
+	ConsistentRead bool                       `json:"consistent_read" yaml:"consistent_read"`
+	Credentials    AmazonAWSCredentialsConfig `json:"credentials" yaml:"credentials"`
+	DataKey        string                     `json:"data_key" yaml:"data_key"`
+	HashKey        string                     `json:"hash_key" yaml:"hash_key"`
+	Region         string                     `json:"region" yaml:"region"`
+	Table          string                     `json:"table" yaml:"table"`
+	TTL            string                     `json:"ttl" yaml:"ttl"`
+	TTLKey         string                     `json:"ttl_key" yaml:"ttl_key"`
+}
+
+// AmazonAWSCredentialsConfig contains configuration params for AWS credentials.
+type AmazonAWSCredentialsConfig struct {
+	ID     string `json:"id" yaml:"id"`
+	Secret string `json:"secret" yaml:"secret"`
+	Token  string `json:"token" yaml:"token"`
+	Role   string `json:"role" yaml:"role"`
 }
 
 // NewDynamoDBConfig creates a MemoryConfig populated with default values.
