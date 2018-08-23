@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Jeffail/gabs"
+
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -22,6 +24,8 @@ import (
 
 // MySQLConfig contains configuration fields for the MySQL input type.
 type MySQLConfig struct {
+	BatchSize     int      `json:"batch_size" yaml:"batch_size"`
+	BufferTimeout string   `json:"buffer_timeout" yaml:"buffer_timeout"`
 	Cache         string   `json:"cache" yaml:"cache"`
 	ConsumerID    uint32   `json:"consumer_id" yaml:"consumer_id"`
 	Databases     []string `json:"databases" yaml:"databases"`
@@ -56,6 +60,8 @@ type MySQL struct {
 	synced bool
 	key    string
 
+	batchSize        int
+	bufferTimeout    time.Duration
 	internalMessages chan *canal.RowsEvent
 	interruptChan    chan struct{}
 	failedMessage    *canal.RowsEvent
@@ -72,6 +78,7 @@ func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metric
 	// create base reader
 	m := MySQL{
 		key:              fmt.Sprintf("%s%d", conf.KeyPrefix, conf.ConsumerID),
+		batchSize:        conf.BatchSize,
 		internalMessages: make(chan *canal.RowsEvent, conf.PrefetchCount),
 		interruptChan:    make(chan struct{}),
 		closed:           make(chan error),
@@ -80,6 +87,16 @@ func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metric
 		stats:            stats,
 		log:              log.NewModule(".input.mysql"),
 	}
+
+	dur := conf.BufferTimeout
+	if dur == "" {
+		dur = "1s"
+	}
+	timeout, err := time.ParseDuration(dur)
+	if err != nil {
+		return nil, err
+	}
+	m.bufferTimeout = timeout
 
 	// build binlog consumer config
 	c := canal.NewDefaultConfig()
@@ -230,35 +247,36 @@ func (m *MySQL) loadPosition() (*mysqlPosition, error) {
 
 // marshalKeys computes a map of primary key columns to values
 func (m *MySQL) marshalKeys(e *canal.RowsEvent, summary *MySQLRowSummary) (map[string]interface{}, error) {
-	var image map[string]interface{}
+	// grab a reference to appropriate source image
+	var src []byte
 	switch e.Action {
 	case canal.InsertAction:
-		image = summary.After
+		src = summary.After
 	case canal.UpdateAction:
-		image = summary.After
+		src = summary.After
 	case canal.DeleteAction:
-		image = summary.Before
+		src = summary.Before
+	}
+	image, err := gabs.ParseJSON(src)
+	if err != nil {
+		return nil, err
 	}
 
 	keys := make(map[string]interface{})
 	for i := range e.Table.PKColumns {
 		col := e.Table.GetPKColumn(i)
-		val, ok := image[col.Name]
-		if !ok {
-			return nil, fmt.Errorf("unable to marshal mysql message keys: missing column %s", col.Name)
-		}
-		keys[col.Name] = val
+		keys[col.Name] = image.S(col.Name).Data()
 	}
 	return keys, nil
 }
 
 // marshalRowSummary converts a row image to json
-func (m *MySQL) marshalRowSummary(table *schema.Table, row []interface{}) map[string]interface{} {
-	result := make(map[string]interface{})
+func (m *MySQL) marshalRowSummary(table *schema.Table, row []interface{}) []byte {
+	result := gabs.New()
 	for i, c := range table.Columns {
-		result[c.Name] = m.parseValue(&c, row[i])
+		result.Set(m.parseValue(&c, row[i]), c.Name)
 	}
-	return result
+	return result.Bytes()
 }
 
 // parse a binlog event into a json byte slice
@@ -290,18 +308,15 @@ func (m *MySQL) parse(e *canal.RowsEvent, log string) (*MysqlMessage, error) {
 // parseRowSummary parses the before and/or after row image
 func (m *MySQL) parseRowSummary(e *canal.RowsEvent) MySQLRowSummary {
 	var summary MySQLRowSummary
-	var before, after map[string]interface{}
 	switch e.Action {
 	case canal.UpdateAction:
-		before = m.marshalRowSummary(e.Table, e.Rows[0])
-		after = m.marshalRowSummary(e.Table, e.Rows[1])
+		summary.Before = m.marshalRowSummary(e.Table, e.Rows[0])
+		summary.After = m.marshalRowSummary(e.Table, e.Rows[1])
 	case canal.InsertAction:
-		after = m.marshalRowSummary(e.Table, e.Rows[0])
+		summary.After = m.marshalRowSummary(e.Table, e.Rows[0])
 	case canal.DeleteAction:
-		before = m.marshalRowSummary(e.Table, e.Rows[0])
+		summary.Before = m.marshalRowSummary(e.Table, e.Rows[0])
 	}
-	summary.After = after
-	summary.Before = before
 	return summary
 }
 
@@ -365,8 +380,8 @@ func (m *MySQL) parseValue(col *schema.TableColumn, value interface{}) interface
 	case schema.TYPE_DATETIME:
 		switch v := value.(type) {
 		case string:
-			vt, _ := time.ParseInLocation(mysql.TimeFormat, string(v), time.Local)
-			return vt.Format(time.RFC3339)
+			vt, _ := time.ParseInLocation(mysql.TimeFormat, string(v), time.UTC)
+			return vt.Format(time.RFC3339Nano)
 		}
 	}
 	return value
@@ -378,6 +393,11 @@ func (m *MySQL) Read() (types.Message, error) {
 	log := m.pos.Log
 	m.RUnlock()
 
+	msg := message.New(nil)
+	timeout := time.After()
+	for {
+
+	}
 	// check for failed message to retry, otherwise block until
 	// the next binlog row event is available
 	var e *canal.RowsEvent
@@ -440,8 +460,8 @@ type MysqlMessage struct {
 // MySQLRowSummary contains the before and after row images of a single
 // binlog row event
 type MySQLRowSummary struct {
-	After  map[string]interface{} `json:"after"`
-	Before map[string]interface{} `json:"before"`
+	After  json.RawMessage `json:"after"`
+	Before json.RawMessage `json:"before"`
 }
 
 // mysqlPosition describes an individual reader's binlog position at a given point in time

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/siddontang/go-mysql/canal"
+
 	"github.com/Jeffail/benthos/lib/cache"
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/manager"
@@ -124,16 +126,16 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 		}
 	}()
 
-	// define mysql fixtures
+	// insert mysql fixtures
 	type fooRow struct {
 		createdAt time.Time
 		title     string
 		enabled   int
 	}
 	rows := []fooRow{
-		fooRow{time.Now(), "foo", 1},
-		fooRow{time.Now(), "bar", 0},
-		fooRow{time.Now(), "baz", 1},
+		fooRow{time.Now().Truncate(time.Microsecond), "foo", 1},
+		fooRow{time.Now().Truncate(time.Microsecond), "bar", 0},
+		fooRow{time.Now().Truncate(time.Microsecond), "baz", 1},
 	}
 	stmt := "INSERT INTO `test`.`foo` (created_at, title, enabled) VALUES (?, ?, ?)"
 	for _, row := range rows {
@@ -143,6 +145,7 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 		}
 	}
 
+	// verify inserts
 	for i, row := range rows {
 		msg, err := r.Read()
 		if err != nil {
@@ -179,20 +182,20 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 				t.Errorf("Expected message %d to have empty before image", i)
 			}
 			image, _ := gabs.ParseJSON(part.Get())
-			if id := image.S("row", "after", "id").String(); id != fmt.Sprintf("%d", i+1) {
-				t.Errorf("Expected message %d to have id of %d, got %s", i, i+1, id)
+			if id := image.S("row", "after", "id").Data().(float64); int(id) != i+1 {
+				t.Errorf("Expected message %d to have id of %d, got %f", i, i+1, id)
 			}
-			createdAt, err := time.Parse(time.RFC3339Nano, image.S("row", "after", "created_at").String())
+			createdAt, err := time.Parse(time.RFC3339Nano, image.S("row", "after", "created_at").Data().(string))
 			if err != nil {
 				t.Errorf("Failed to parse message %d created_at timestamp: %v", i, err)
 			} else if !createdAt.Equal(row.createdAt) {
 				t.Errorf("Expected message %d to have created_at of %s, got %s", i, row.createdAt, createdAt)
 			}
-			if title := image.S("row", "after", "title").String(); title != row.title {
+			if title := image.S("row", "after", "title").Data().(string); title != row.title {
 				t.Errorf("Expected message %d to have title %s, got %s", i, row.title, title)
 			}
-			if enabled := image.S("row", "after", "title").String(); enabled != fmt.Sprintf("%d", row.enabled) {
-				t.Errorf("Expected message %d to have enabled %d, got %s", i, row.enabled, enabled)
+			if enabled := image.S("row", "after", "enabled").Data().(float64); int(enabled) != row.enabled {
+				t.Errorf("Expected message %d to have enabled %d, got %d", i, row.enabled, int(enabled))
 			}
 		}
 		if err := r.Acknowledge(nil); err != nil {
@@ -200,6 +203,63 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 		}
 	}
 
+	// modify or delete records
+	modifications := []struct {
+		stmt   string
+		id     float64
+		action string
+		title  string
+	}{
+		{"UPDATE `test`.`foo` SET title = 'qux' WHERE id = 1;", 1, canal.UpdateAction, "qux"},
+		{"UPDATE `test`.`foo` SET title = 'quux' WHERE id = 2;", 2, canal.UpdateAction, "quux"},
+		{"DELETE FROM `test`.`foo` WHERE id = 3;", 3, canal.DeleteAction, ""},
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mod := range modifications {
+		tx.Exec(mod.stmt)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	// verify update & delete
+	for i, mod := range modifications {
+		msg, err := r.Read()
+		if err != nil {
+			t.Error(err)
+		} else {
+			fmt.Println(string(msg.Get(0).Get()))
+			record, err := gabs.ParseJSON(msg.Get(0).Get())
+			if err != nil {
+				t.Error(err)
+				continue
+			}
+			action, ok := record.S("type").Data().(string)
+			if !ok || action != mod.action {
+				t.Errorf("Expected modification %d to have type %s, got %s", i, mod.action, action)
+			}
+			if mod.action == canal.UpdateAction {
+				title, ok := record.S("row", "after", "title").Data().(string)
+				if !ok || title != mod.title {
+					t.Errorf("Expected modification %d to have title %s, got %s", i, mod.title, title)
+				}
+			} else {
+
+				if after := record.S("row", "after").Data(); after != nil {
+					t.Errorf("Expected modification %d to have empty after image, got %s", i, after)
+				}
+				id, ok := record.S("row", "before", "id").Data().(float64)
+				if !ok || id != mod.id {
+					t.Errorf("Expected modification %d to have id %f, got %f", i, mod.id, id)
+				}
+			}
+		}
+	}
+
+	// verify cache
 	var pos mysqlPosition
 	val, err := c.Get(r.key)
 	if err != nil {
