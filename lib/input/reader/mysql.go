@@ -55,6 +55,9 @@ type MySQLConfig struct {
 	PrefetchCount uint `json:"prefetch_count" yaml:"prefetch_count"`
 	// MySQL port
 	Port uint32 `json:"port" yaml:"port"`
+	// Optional duration string used to throttle how often the consumer offsets
+	// are written to the cache.
+	SyncInterval string `json:"sync_interval" yaml:"sync_interval"`
 	// An optional table whitelist. This field is only honored when subscribed
 	// to a single database.
 	Tables []string `json:"tables" yaml:"tables"`
@@ -77,10 +80,10 @@ type MySQL struct {
 	sync.RWMutex
 	canal.DummyEventHandler
 
-	canal  *canal.Canal
-	pos    mysqlPosition
-	synced bool
-	key    string
+	canal        *canal.Canal
+	pos          mysqlPosition
+	syncInterval time.Duration
+	key          string
 
 	batchSize        int
 	bufferTimeout    time.Duration
@@ -100,6 +103,9 @@ type MySQL struct {
 func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metrics.Type) (*MySQL, error) {
 	// create base reader
 	m := MySQL{
+		pos: mysqlPosition{
+			ConsumerID: conf.ConsumerID,
+		},
 		key:              fmt.Sprintf("%s%d", conf.KeyPrefix, conf.ConsumerID),
 		internalMessages: make(chan *canal.RowsEvent, conf.PrefetchCount),
 		interruptChan:    make(chan struct{}),
@@ -125,6 +131,15 @@ func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metric
 		return nil, err
 	}
 	m.bufferTimeout = timeout
+
+	var syncInterval time.Duration
+	if conf.SyncInterval != "" {
+		syncInterval, err = time.ParseDuration(conf.SyncInterval)
+		if err != nil {
+			return nil, err
+		}
+	}
+	m.syncInterval = syncInterval
 
 	// build binlog consumer config
 	c := canal.NewDefaultConfig()
@@ -158,18 +173,9 @@ func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metric
 func (m *MySQL) OnPosSynced(pos mysql.Position, force bool) error {
 	// update state
 	m.Lock()
-	m.pos = mysqlPosition{
-		ConsumerID: m.conf.ConsumerID,
-		Log:        pos.Name,
-		Position:   pos.Pos,
-	}
-	m.synced = false
+	m.pos.Log = pos.Name
+	m.pos.Position = pos.Pos
 	m.Unlock()
-
-	// sync if force flag is true
-	if force == true {
-		return m.Acknowledge(nil)
-	}
 
 	return nil
 }
@@ -193,7 +199,8 @@ func (m *MySQL) Acknowledge(err error) error {
 
 	m.Lock()
 	defer m.Unlock()
-	if m.synced == true {
+	now := time.Now()
+	if m.syncInterval != 0 && now.Sub(m.pos.LastSyncedAt) < m.syncInterval {
 		return nil
 	}
 
@@ -207,7 +214,6 @@ func (m *MySQL) Acknowledge(err error) error {
 		return fmt.Errorf("error syncing mysql position: %v", err)
 	}
 
-	m.synced = true
 	return nil
 }
 
@@ -453,31 +459,33 @@ func (m *MySQL) Read() (types.Message, error) {
 		return nil, types.ErrTypeClosed
 	}
 
-	// return early on batch size 1
-	if m.batchSize == 1 {
-		return msg, nil
-	}
-
 	// continue to add parts until batch is full or buffer timeout reached
-	timeout := time.After(m.bufferTimeout)
-batch:
-	for {
-		select {
-		case e := <-m.internalMessages:
-			part, err := m.toPart(e, log)
-			if err != nil {
-				return nil, err
-			}
-			msg.Append(part)
-			if msg.Len() == m.batchSize {
+	if m.batchSize > 1 {
+		timeout := time.After(m.bufferTimeout)
+	batch:
+		for {
+			select {
+			case e = <-m.internalMessages:
+				part, err := m.toPart(e, log)
+				if err != nil {
+					return nil, err
+				}
+				msg.Append(part)
+				if msg.Len() == m.batchSize {
+					break batch
+				}
+			case <-timeout:
 				break batch
+			case <-m.interruptChan:
+				return nil, types.ErrTypeClosed
 			}
-		case <-timeout:
-			break batch
-		case <-m.interruptChan:
-			return nil, types.ErrTypeClosed
 		}
 	}
+
+	// update position
+	m.Lock()
+	m.pos.Position = e.Header.LogPos
+	m.Unlock()
 
 	return msg, nil
 }
