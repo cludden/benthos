@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Jeffail/benthos/lib/message/metadata"
+
 	"github.com/Jeffail/gabs"
 
 	"github.com/Jeffail/benthos/lib/log"
@@ -24,20 +26,40 @@ import (
 
 // MySQLConfig contains configuration fields for the MySQL input type.
 type MySQLConfig struct {
-	BatchSize     int      `json:"batch_size" yaml:"batch_size"`
-	BufferTimeout string   `json:"buffer_timeout" yaml:"buffer_timeout"`
-	Cache         string   `json:"cache" yaml:"cache"`
-	ConsumerID    uint32   `json:"consumer_id" yaml:"consumer_id"`
-	Databases     []string `json:"databases" yaml:"databases"`
-	Host          string   `json:"host" yaml:"host"`
-	KeyPrefix     string   `json:"key_prefix" yaml:"key_prefix"`
-	Latest        bool     `json:"latest" yaml:"latest"`
-	MySQLDumpPath string   `json:"mysqldump_path" yaml:"mysqldump_path"`
-	Password      string   `json:"password" yaml:"password"`
-	PrefetchCount uint     `json:"prefetch_count" yaml:"prefetch_count"`
-	Port          uint32   `json:"port" yaml:"port"`
-	Tables        []string `json:"tables" yaml:"tables"`
-	Username      string   `json:"username" yaml:"username"`
+	// Specifies the number of row events to include in a single message. The
+	// default BatchSize is 1.
+	BatchSize int `json:"batch_size" yaml:"batch_size"`
+	// Specifies the buffering window duration when using a BatchSize greater
+	// than 1. Default is "1s".
+	BufferTimeout string `json:"buffer_timeout" yaml:"buffer_timeout"`
+	// Specifies the name of the cache resource used for storing consumer state.
+	Cache string `json:"cache" yaml:"cache"`
+	// Specifies the unique mysql server id.
+	ConsumerID uint32 `json:"consumer_id" yaml:"consumer_id"`
+	// Specifies a list of databases to subscribe to.
+	Databases []string `json:"databases" yaml:"databases"`
+	// Specifies the mysql host name.
+	Host string `json:"host" yaml:"host"`
+	// An optional cache prefix that can be used when sharing a single cache
+	// resource.
+	KeyPrefix string `json:"key_prefix" yaml:"key_prefix"`
+	// Boolean flag that allows the consumer to fall back to using the latest
+	// binlog position when no previous offset is available.
+	Latest bool `json:"latest" yaml:"latest"`
+	// Path to the mysqldump executable.This field is required if the desired
+	// starting position is `dump`
+	MySQLDumpPath string `json:"mysqldump_path" yaml:"mysqldump_path"`
+	// MySQL user credentials
+	Password string `json:"password" yaml:"password"`
+	// Specifies the number of row events to buffer to improve read performance.
+	PrefetchCount uint `json:"prefetch_count" yaml:"prefetch_count"`
+	// MySQL port
+	Port uint32 `json:"port" yaml:"port"`
+	// An optional table whitelist. This field is only honored when subscribed
+	// to a single database.
+	Tables []string `json:"tables" yaml:"tables"`
+	// MySQL user name
+	Username string `json:"username" yaml:"username"`
 }
 
 // NewMySQLConfig creates a new MySQLConfig with default values
@@ -66,6 +88,7 @@ type MySQL struct {
 	interruptChan    chan struct{}
 	failedMessage    *canal.RowsEvent
 	closed           chan error
+	open             bool
 
 	conf  MySQLConfig
 	cache types.Cache
@@ -78,7 +101,6 @@ func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metric
 	// create base reader
 	m := MySQL{
 		key:              fmt.Sprintf("%s%d", conf.KeyPrefix, conf.ConsumerID),
-		batchSize:        conf.BatchSize,
 		internalMessages: make(chan *canal.RowsEvent, conf.PrefetchCount),
 		interruptChan:    make(chan struct{}),
 		closed:           make(chan error),
@@ -87,6 +109,12 @@ func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metric
 		stats:            stats,
 		log:              log.NewModule(".input.mysql"),
 	}
+
+	batchSize := conf.BatchSize
+	if batchSize == 0 {
+		batchSize = 1
+	}
+	m.batchSize = batchSize
 
 	dur := conf.BufferTimeout
 	if dur == "" {
@@ -185,6 +213,9 @@ func (m *MySQL) Acknowledge(err error) error {
 
 // CloseAsync shuts down the MySQL input and stops processing requests.
 func (m *MySQL) CloseAsync() {
+	m.Lock()
+	defer m.Unlock()
+	m.open = false
 	close(m.interruptChan)
 }
 
@@ -217,6 +248,7 @@ func (m *MySQL) Connect() error {
 	go func() {
 		m.closed <- start(m.canal)
 	}()
+	m.open = true
 
 	return nil
 }
@@ -389,31 +421,69 @@ func (m *MySQL) parseValue(col *schema.TableColumn, value interface{}) interface
 
 // Read attempts to read a new message from MySQL.
 func (m *MySQL) Read() (types.Message, error) {
+	// read local state
 	m.RLock()
 	log := m.pos.Log
+	failedMessage := m.failedMessage
+	open := m.open
 	m.RUnlock()
 
-	msg := message.New(nil)
-	timeout := time.After()
-	for {
-
+	// exit early if reader has been closed
+	if !open {
+		return nil, types.ErrNotConnected
 	}
-	// check for failed message to retry, otherwise block until
-	// the next binlog row event is available
+
+	// exit early if we've failed to parse a row event, no amount of retries
+	// will change the outcome
+	if failedMessage != nil {
+		return nil, types.ErrBadMessageBytes
+	}
+
+	// block until first event is available
+	msg := message.New(nil)
 	var e *canal.RowsEvent
-	if m.failedMessage != nil {
-		m.Lock()
-		e = m.failedMessage
-		m.failedMessage = nil
-		m.Unlock()
-	} else {
+	select {
+	case e = <-m.internalMessages:
+		part, err := m.toPart(e, log)
+		if err != nil {
+			return nil, err
+		}
+		msg.Append(part)
+	case <-m.interruptChan:
+		return nil, types.ErrTypeClosed
+	}
+
+	// return early on batch size 1
+	if m.batchSize == 1 {
+		return msg, nil
+	}
+
+	// continue to add parts until batch is full or buffer timeout reached
+	timeout := time.After(m.bufferTimeout)
+batch:
+	for {
 		select {
-		case e = <-m.internalMessages:
+		case e := <-m.internalMessages:
+			part, err := m.toPart(e, log)
+			if err != nil {
+				return nil, err
+			}
+			msg.Append(part)
+			if msg.Len() == m.batchSize {
+				break batch
+			}
+		case <-timeout:
+			break batch
 		case <-m.interruptChan:
 			return nil, types.ErrTypeClosed
 		}
 	}
 
+	return msg, nil
+}
+
+// toPart parses a mysql row event and converts it into a benthos message part
+func (m *MySQL) toPart(e *canal.RowsEvent, log string) (*message.Part, error) {
 	// parse the binlog row event, requeue it if there is an error
 	record, err := m.parse(e, log)
 	if err != nil {
@@ -428,10 +498,12 @@ func (m *MySQL) Read() (types.Message, error) {
 	if err := part.SetJSON(record); err != nil {
 		return nil, err
 	}
-
-	msg := message.New(nil)
-	msg.Append(&part)
-	return msg, nil
+	part.SetMetadata(metadata.New(map[string]string{
+		"mysql_log_file":     log,
+		"mysql_log_position": fmt.Sprintf("%d", e.Header.LogPos),
+		"mysql_server_id":    fmt.Sprintf("%d", m.conf.ConsumerID),
+	}))
+	return &part, nil
 }
 
 // WaitForClose blocks until the MySQL input has closed down.

@@ -7,20 +7,27 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
-
-	"github.com/siddontang/go-mysql/canal"
 
 	"github.com/Jeffail/benthos/lib/cache"
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/manager"
 	"github.com/Jeffail/benthos/lib/metrics"
+	"github.com/Jeffail/benthos/lib/types"
 	"github.com/Jeffail/gabs"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/ory/dockertest"
 	"github.com/ory/dockertest/docker"
+	"github.com/siddontang/go-mysql/canal"
 )
+
+type testMySQLRow struct {
+	createdAt time.Time
+	title     string
+	enabled   int
+}
 
 func TestMySQLIntegration(t *testing.T) {
 	if testing.Short() {
@@ -99,6 +106,14 @@ func TestMySQLIntegration(t *testing.T) {
 	t.Run("testMySQLConnect", func(t *testing.T) {
 		testMySQLConnect(t, db, config)
 	})
+
+	t.Run("testMySQLBatch", func(t *testing.T) {
+		testMySQLBatch(t, db, config)
+	})
+
+	t.Run("testMySQLDisconnect", func(t *testing.T) {
+		testMySQLDisconnect(t, config)
+	})
 }
 
 func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
@@ -127,15 +142,10 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 	}()
 
 	// insert mysql fixtures
-	type fooRow struct {
-		createdAt time.Time
-		title     string
-		enabled   int
-	}
-	rows := []fooRow{
-		fooRow{time.Now().Truncate(time.Microsecond), "foo", 1},
-		fooRow{time.Now().Truncate(time.Microsecond), "bar", 0},
-		fooRow{time.Now().Truncate(time.Microsecond), "baz", 1},
+	rows := []testMySQLRow{
+		testMySQLRow{time.Now().Truncate(time.Microsecond), "foo", 1},
+		testMySQLRow{time.Now().Truncate(time.Microsecond), "bar", 0},
+		testMySQLRow{time.Now().Truncate(time.Microsecond), "baz", 1},
 	}
 	stmt := "INSERT INTO `test`.`foo` (created_at, title, enabled) VALUES (?, ?, ?)"
 	for _, row := range rows {
@@ -171,6 +181,9 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 			}
 			if ts := record.Timestamp; time.Now().Sub(ts) > time.Second*5 {
 				t.Errorf("Expected message %d to have timestamp within the last five seconds", i)
+			}
+			if id, ok := record.Key["id"].(float64); !ok || int(id) != i+1 {
+				t.Errorf("Expected message %d to have 'key.id' of %d, got %f", i, i+1, id)
 			}
 			ids := strings.Split(record.ID, ":")
 			if l := len(ids); l != 5 {
@@ -231,7 +244,6 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 		if err != nil {
 			t.Error(err)
 		} else {
-			fmt.Println(string(msg.Get(0).Get()))
 			record, err := gabs.ParseJSON(msg.Get(0).Get())
 			if err != nil {
 				t.Error(err)
@@ -280,4 +292,114 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 	if time.Now().Sub(pos.LastSyncedAt) > time.Second {
 		t.Error("Expected cache position to have been synced within the last econd")
 	}
+}
+
+func testMySQLBatch(t *testing.T, db *sql.DB, config MySQLConfig) {
+	config.BatchSize = 3
+	met := metrics.DudType{}
+	log := log.New(os.Stdout, log.Config{LogLevel: "DEBUG"})
+	mgr, err := manager.New(manager.NewConfig(), nil, log, met)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := cache.NewMemory(cache.NewConfig(), mgr, log, metrics.DudType{})
+
+	r, err := NewMySQL(config, c, log, metrics.DudType{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		r.CloseAsync()
+		if err := r.WaitForClose(time.Second); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	// insert mysql fixtures
+
+	rows := []testMySQLRow{
+		testMySQLRow{time.Now().Truncate(time.Microsecond), "quuz", 1},
+		testMySQLRow{time.Now().Truncate(time.Microsecond), "corge", 0},
+		testMySQLRow{time.Now().Truncate(time.Microsecond), "grault", 1},
+	}
+	stmt := "INSERT INTO `test`.`foo` (created_at, title, enabled) VALUES (?, ?, ?)"
+	for _, row := range rows {
+		_, err = db.Exec(stmt, row.createdAt, row.title, row.enabled)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// verify batch
+	msg, err := r.Read()
+	if err != nil {
+		t.Error(err)
+	} else {
+		if length := msg.Len(); length != 3 {
+			t.Fatalf("Expected message to have length of %d, got %d", 3, length)
+		}
+		for i, row := range rows {
+			part, err := msg.Get(i).JSON()
+			if err != nil {
+				t.Error(err)
+			} else {
+				record, _ := part.(*MysqlMessage)
+				if action := record.Type; action != canal.InsertAction {
+					t.Errorf("Expected part %d to have type %s, got %s", i, canal.InsertAction, action)
+				}
+				if record.Row.Before != nil {
+					t.Errorf("Expected part %d to have nil before image", i)
+				}
+				after, err := gabs.ParseJSON(record.Row.After)
+				if err != nil {
+					t.Error(err)
+				}
+				if title, ok := after.S("title").Data().(string); !ok || title != row.title {
+					t.Errorf("Expected part %d to have title %s, got %s", i, row.title, title)
+				}
+			}
+		}
+	}
+}
+
+func testMySQLDisconnect(t *testing.T, config MySQLConfig) {
+	met := metrics.DudType{}
+	log := log.New(os.Stdout, log.Config{LogLevel: "DEBUG"})
+	mgr, err := manager.New(manager.NewConfig(), nil, log, met)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := cache.NewMemory(cache.NewConfig(), mgr, log, metrics.DudType{})
+
+	r, err := NewMySQL(config, c, log, metrics.DudType{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Second * 3)
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		r.CloseAsync()
+		if err := r.WaitForClose(time.Second); err != nil {
+			t.Error(err)
+		}
+		wg.Done()
+	}()
+
+	if _, err = r.Read(); err != types.ErrTypeClosed && err != types.ErrNotConnected {
+		t.Errorf("Wrong error: %v != %v", err, types.ErrTypeClosed)
+	}
+
+	wg.Wait()
 }
