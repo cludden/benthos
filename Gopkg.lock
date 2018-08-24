@@ -488,7 +488,7 @@
     "replication",
     "schema"
   ]
-  revision = "237167a664b33ee1d59ae57b77806082640885fe"
+  revision = "555d0d9bd19444fdc4a4ee4b8b4808948a43eba7"
 
 [[projects]]
   name = "github.com/sirupsen/logrus"
