@@ -101,6 +101,7 @@ func TestMySQLIntegration(t *testing.T) {
 	config.Latest = true
 	config.Password = "s3cr3t"
 	config.Port = uint32(port)
+	config.SyncInterval = "5m"
 	config.Username = "root"
 
 	t.Run("testMySQLConnect", func(t *testing.T) {
@@ -126,6 +127,7 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 
 	c, err := cache.NewMemory(cache.NewConfig(), mgr, log, metrics.DudType{})
 
+	config.SyncInterval = "1ms"
 	r, err := NewMySQL(config, c, log, metrics.DudType{})
 	if err != nil {
 		t.Fatal(err)
@@ -135,6 +137,7 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 		t.Fatal(err)
 	}
 	defer func() {
+		fmt.Println("closing reader...")
 		r.CloseAsync()
 		if err := r.WaitForClose(time.Second); err != nil {
 			t.Error(err)
@@ -269,11 +272,16 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 				}
 			}
 		}
+		if err := r.Acknowledge(nil); err != nil {
+			t.Error(err)
+		}
 	}
 
+	time.Sleep(time.Millisecond * 2)
 	// verify cache
 	var pos mysqlPosition
 	val, err := c.Get(r.key)
+	fmt.Println("cache result:", val, err)
 	if err != nil {
 		t.Error(err)
 	}
