@@ -85,6 +85,7 @@
     "service/dynamodb/dynamodbiface",
     "service/dynamodb/expression",
     "service/kinesis",
+    "service/kinesis/kinesisiface",
     "service/s3",
     "service/s3/s3iface",
     "service/s3/s3manager",
@@ -564,6 +565,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "29f3e5490d7153f6d755be0530d92a86e52bb0c4af09cc419b0a05df7408fe91"
+  inputs-digest = "67afdc180981d1a94cd3f08ae3ce118cefc0d59cf4053c7a2e6068f21182872b"
   solver-name = "gps-cdcl"
   solver-version = 1
