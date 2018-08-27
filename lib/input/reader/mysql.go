@@ -184,101 +184,6 @@ func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metric
 
 //------------------------------------------------------------------------------
 
-// OnPosSynced handles a MySQL binlog position event
-func (m *MySQL) OnPosSynced(pos mysql.Position, force bool) error {
-	m.lastPosition = pos
-	return nil
-}
-
-// OnRow handles a MySQL binlog row event
-func (m *MySQL) OnRow(e *canal.RowsEvent) error {
-	part, err := m.toPart(e, m.lastPosition.Name)
-	if err != nil {
-		m.log.Errorf("error parsing mysql row event: %v", err)
-		close(m.internalMessages)
-		return err
-	}
-
-	select {
-	case m.internalMessages <- part:
-	case <-m.interruptChan:
-	}
-
-	return nil
-}
-
-//------------------------------------------------------------------------------
-
-// Acknowledge attempts to synchronize the current reader state with the backend
-func (m *MySQL) Acknowledge(err error) error {
-	if err != nil {
-		return nil
-	}
-
-	l := len(m.unacked)
-	if l == 0 {
-		return nil
-	}
-
-	// compute furthest read position using last unacked part metadata
-	var pos mysql.Position
-	last := m.unacked[l-1]
-	meta := last.Metadata()
-	pos.Name = meta.Get(metaMysqlLogFile)
-	offset, _ := strconv.ParseInt(meta.Get("mysql_log_position"), 10, 64)
-	pos.Pos = uint32(offset)
-
-	// send position and clear unacked
-	m.ack <- pos
-	m.unacked = nil
-
-	return nil
-}
-
-// CloseAsync shuts down the MySQL input and stops processing requests.
-func (m *MySQL) CloseAsync() {
-	go func() {
-		close(m.interruptChan)
-		m.canal.Close()
-	}()
-}
-
-// Connect retrieves the starting binlog position and begins streaming
-// change data capture events from mysql
-func (m *MySQL) Connect() error {
-	m.Lock()
-	defer m.Unlock()
-
-	// load starting position
-	pos, err := m.loadPosition()
-	if err != nil {
-		return fmt.Errorf("unable to load mysql binlog position: %v", err)
-	}
-
-	// start the binlog consumer
-	var start func(c *canal.Canal) error
-	if pos == nil {
-		start = func(c *canal.Canal) error {
-			return c.Run()
-		}
-	} else {
-		start = func(c *canal.Canal) error {
-			return c.RunFrom(mysql.Position{
-				Name: pos.Log,
-				Pos:  pos.Position,
-			})
-		}
-	}
-	go func() {
-		m.closed <- start(m.canal)
-		close(m.ack)
-		close(m.internalMessages)
-	}()
-	go m.periodicSync(m.conf.ConsumerID, m.syncInterval)
-
-	return nil
-}
-
 // loadPosition computes the consumer's starting position
 func (m *MySQL) loadPosition() (*mysqlPosition, error) {
 	var pos mysqlPosition
@@ -344,6 +249,29 @@ func (m *MySQL) marshalRowSummary(table *schema.Table, row []interface{}) []byte
 		result.Set(m.parseValue(&c, row[i]), c.Name)
 	}
 	return result.Bytes()
+}
+
+// OnPosSynced handles a MySQL binlog position event
+func (m *MySQL) OnPosSynced(pos mysql.Position, force bool) error {
+	m.lastPosition = pos
+	return nil
+}
+
+// OnRow handles a MySQL binlog row event
+func (m *MySQL) OnRow(e *canal.RowsEvent) error {
+	part, err := m.toPart(e, m.lastPosition.Name)
+	if err != nil {
+		m.log.Errorf("error parsing mysql row event: %v", err)
+		close(m.internalMessages)
+		return err
+	}
+
+	select {
+	case m.internalMessages <- part:
+	case <-m.interruptChan:
+	}
+
+	return nil
 }
 
 // parse converts a mysql row event into a MysqlMessage
@@ -488,6 +416,124 @@ func (m *MySQL) periodicSync(consumerID uint32, syncInterval time.Duration) {
 	}
 }
 
+// sync the consumer position with the cache
+func (m *MySQL) sync(position mysqlPosition) error {
+	// continue if there is nothing new to acknowledge
+	if position.Log == "" || position.LastSyncedAt.IsZero() {
+		return nil
+	}
+
+	// update sync time and marshal position
+	position.LastSyncedAt = time.Now()
+	p, err := json.Marshal(&position)
+	if err != nil {
+		m.log.Errorf("error marshalling consumer position: %v", err)
+		return err
+	}
+
+	m.backoff.Reset()
+	if err := backoff.Retry(func() error {
+		return m.cache.Set(m.key, p)
+	}, m.backoff); err != nil {
+		m.log.Errorf("error persisting consumer position: %v", err)
+		return err
+	}
+
+	m.log.Infof("synced consumer %d position: %s:%d\n", position.ConsumerID, position.Log, position.Position)
+	return nil
+}
+
+// toPart parses a mysql row event and converts it into a benthos message part
+func (m *MySQL) toPart(e *canal.RowsEvent, log string) (*message.Part, error) {
+	record, err := m.parse(e, log)
+	if err != nil {
+		return nil, types.ErrBadMessageBytes
+	}
+
+	var part message.Part
+	if err := part.SetJSON(record); err != nil {
+		return nil, err
+	}
+	part.SetMetadata(metadata.New(map[string]string{
+		metaMysqlLogFile:     log,
+		metaMysqlLogPosition: strconv.FormatInt(int64(e.Header.LogPos), 10),
+		metaMysqlServerID:    strconv.FormatInt(int64(m.conf.ConsumerID), 10),
+	}))
+	return &part, nil
+}
+
+//------------------------------------------------------------------------------
+
+// Acknowledge attempts to synchronize the current reader state with the backend
+func (m *MySQL) Acknowledge(err error) error {
+	if err != nil {
+		return nil
+	}
+
+	l := len(m.unacked)
+	if l == 0 {
+		return nil
+	}
+
+	// compute furthest read position using last unacked part metadata
+	var pos mysql.Position
+	last := m.unacked[l-1]
+	meta := last.Metadata()
+	pos.Name = meta.Get(metaMysqlLogFile)
+	offset, _ := strconv.ParseInt(meta.Get("mysql_log_position"), 10, 64)
+	pos.Pos = uint32(offset)
+
+	// send position and clear unacked
+	m.ack <- pos
+	m.unacked = nil
+
+	return nil
+}
+
+// CloseAsync shuts down the MySQL input and stops processing requests.
+func (m *MySQL) CloseAsync() {
+	go func() {
+		close(m.interruptChan)
+		m.canal.Close()
+	}()
+}
+
+// Connect retrieves the starting binlog position and begins streaming
+// change data capture events from mysql
+func (m *MySQL) Connect() error {
+	m.Lock()
+	defer m.Unlock()
+
+	// load starting position
+	pos, err := m.loadPosition()
+	if err != nil {
+		return fmt.Errorf("unable to load mysql binlog position: %v", err)
+	}
+
+	// start the binlog consumer
+	var start func(c *canal.Canal) error
+	if pos == nil {
+		start = func(c *canal.Canal) error {
+			return c.Run()
+		}
+	} else {
+		start = func(c *canal.Canal) error {
+			return c.RunFrom(mysql.Position{
+				Name: pos.Log,
+				Pos:  pos.Position,
+			})
+		}
+	}
+	go func() {
+		m.closed <- start(m.canal)
+		close(m.ack)
+		close(m.internalMessages)
+	}()
+	go m.periodicSync(m.conf.ConsumerID, m.syncInterval)
+
+	return nil
+}
+
 // Read attempts to read a new message from MySQL.
 func (m *MySQL) Read() (types.Message, error) {
 	var n int
@@ -544,52 +590,6 @@ func (m *MySQL) Read() (types.Message, error) {
 	}
 
 	return msg, nil
-}
-
-// sync the consumer position with the cache
-func (m *MySQL) sync(position mysqlPosition) error {
-	// continue if there is nothing new to acknowledge
-	if position.Log == "" || position.LastSyncedAt.IsZero() {
-		return nil
-	}
-
-	// update sync time and marshal position
-	position.LastSyncedAt = time.Now()
-	p, err := json.Marshal(&position)
-	if err != nil {
-		m.log.Errorf("error marshalling consumer position: %v", err)
-		return err
-	}
-
-	m.backoff.Reset()
-	if err := backoff.Retry(func() error {
-		return m.cache.Set(m.key, p)
-	}, m.backoff); err != nil {
-		m.log.Errorf("error persisting consumer position: %v", err)
-		return err
-	}
-
-	m.log.Infof("synced consumer %d position: %s:%d\n", position.ConsumerID, position.Log, position.Position)
-	return nil
-}
-
-// toPart parses a mysql row event and converts it into a benthos message part
-func (m *MySQL) toPart(e *canal.RowsEvent, log string) (*message.Part, error) {
-	record, err := m.parse(e, log)
-	if err != nil {
-		return nil, types.ErrBadMessageBytes
-	}
-
-	var part message.Part
-	if err := part.SetJSON(record); err != nil {
-		return nil, err
-	}
-	part.SetMetadata(metadata.New(map[string]string{
-		metaMysqlLogFile:     log,
-		metaMysqlLogPosition: strconv.FormatInt(int64(e.Header.LogPos), 10),
-		metaMysqlServerID:    strconv.FormatInt(int64(m.conf.ConsumerID), 10),
-	}))
-	return &part, nil
 }
 
 // WaitForClose blocks until the MySQL input has closed down.
