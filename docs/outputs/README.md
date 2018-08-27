@@ -32,18 +32,19 @@ conditions please [read the docs here](../conditions/README.md)
 8. [`http_server`](#http_server)
 9. [`inproc`](#inproc)
 10. [`kafka`](#kafka)
-11. [`mqtt`](#mqtt)
-12. [`nanomsg`](#nanomsg)
-13. [`nats`](#nats)
-14. [`nats_stream`](#nats_stream)
-15. [`nsq`](#nsq)
-16. [`redis_list`](#redis_list)
-17. [`redis_pubsub`](#redis_pubsub)
-18. [`s3`](#s3)
-19. [`sqs`](#sqs)
-20. [`stdout`](#stdout)
-21. [`websocket`](#websocket)
-22. [`zmq4`](#zmq4)
+11. [`kinesis`](#kinesis)
+12. [`mqtt`](#mqtt)
+13. [`nanomsg`](#nanomsg)
+14. [`nats`](#nats)
+15. [`nats_stream`](#nats_stream)
+16. [`nsq`](#nsq)
+17. [`redis_list`](#redis_list)
+18. [`redis_pubsub`](#redis_pubsub)
+19. [`redis_streams`](#redis_streams)
+20. [`s3`](#s3)
+21. [`sqs`](#sqs)
+22. [`stdout`](#stdout)
+23. [`websocket`](#websocket)
 
 ## `amqp`
 
@@ -209,8 +210,11 @@ elasticsearch:
   - http://localhost:9200
 ```
 
-Publishes messages into an Elasticsearch index as documents. This output
-currently does not support creating the target index.
+Publishes messages into an Elasticsearch index. This output currently does not
+support creating the target index.
+
+Both the `id` and `index` fields can be dynamically set using function
+interpolations described [here](../config_interpolation.md#functions).
 
 ## `file`
 
@@ -380,6 +384,27 @@ value. If the key is empty then a partition is chosen at random. You can
 alternatively force the partitioner to round-robin partitions with the field
 `round_robin_partitions`.
 
+## `kinesis`
+
+``` yaml
+type: kinesis
+kinesis:
+  credentials:
+    id: ""
+    role: ""
+    secret: ""
+    token: ""
+  hash_key: ""
+  partition_key: ""
+  region: eu-west-1
+  stream: ""
+```
+
+Sends messages to a Kinesis stream, both the `partition_key`
+(required) and `hash_key` (optional) fields can be dynamically set
+using function interpolations described
+[here](../config_interpolation.md#functions).
+
 ## `mqtt`
 
 ``` yaml
@@ -475,6 +500,28 @@ redis_pubsub:
 Publishes messages through the Redis PubSub model. It is not possible to
 guarantee that messages have been received.
 
+## `redis_streams`
+
+``` yaml
+type: redis_streams
+redis_streams:
+  body_key: body
+  max_length: 0
+  stream: benthos_stream
+  url: tcp://localhost:6379
+```
+
+Pushes messages to a Redis (v5.0+) Stream (which is created if it doesn't
+already exist) using the XADD command. It's possible to specify a maximum length
+of the target stream by setting it to a value greater than 0, in which case this
+cap is applied only when Redis is able to remove a whole macro node, for
+efficiency.
+
+Redis stream entries are key/value pairs, as such it is necessary to specify the
+key to be set to the body of the message. All metadata fields of the message
+will also be set as key/value pairs, if there is a key collision between
+a metadata item and the body then the body takes precedence.
+
 ## `s3`
 
 ``` yaml
@@ -550,19 +597,3 @@ websocket:
 ```
 
 Sends messages to an HTTP server via a websocket connection.
-
-## `zmq4`
-
-``` yaml
-type: zmq4
-zmq4:
-  bind: true
-  high_water_mark: 0
-  poll_timeout_ms: 5000
-  socket_type: PUSH
-  urls:
-  - tcp://*:5556
-```
-
-The zmq4 output type attempts to send messages to a ZMQ4 port, currently only
-PUSH and PUB sockets are supported.

@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### 0.26.2 - 2018-08-27
+
+### Added
+
+- New `metric` processor.
+
+### 0.26.1 - 2018-08-26
+
+### Added
+
+- New `redis_streams` input and output.
+
+### 0.26.0 - 2018-08-25
+
+### Added
+
+- New `kinesis` input and output.
+
+### 0.25.0 - 2018-08-22
+
+### Added
+
+- The `index` field of the `elasticsearch` output can now be dynamically set
+  using function interpolation.
+- New `hash` processor.
+
+### Changed
+
+- API: The `metrics.Type` interface has been changed in order to add labels.
+
 ### 0.24.0 - 2018-08-17
 
 ### Changed

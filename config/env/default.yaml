@@ -99,6 +99,21 @@ input:
           skip_cert_verify: ${INPUT_KAFKA_BALANCED_TLS_SKIP_CERT_VERIFY:false}
         topics:
         - ${INPUT_KAFKA_BALANCED_TOPICS:benthos_stream}
+      kinesis:
+        client_id: ${INPUT_KINESIS_CLIENT_ID:benthos_consumer}
+        commit_period_ms: ${INPUT_KINESIS_COMMIT_PERIOD_MS:1000}
+        credentials:
+          id: ${INPUT_KINESIS_CREDENTIALS_ID}
+          role: ${INPUT_KINESIS_CREDENTIALS_ROLE}
+          secret: ${INPUT_KINESIS_CREDENTIALS_SECRET}
+          token: ${INPUT_KINESIS_CREDENTIALS_TOKEN}
+        dynamodb_table: ${INPUT_KINESIS_DYNAMODB_TABLE}
+        limit: ${INPUT_KINESIS_LIMIT:100}
+        region: ${INPUT_KINESIS_REGION:eu-west-1}
+        shard: ${INPUT_KINESIS_SHARD:0}
+        start_from_oldest: ${INPUT_KINESIS_START_FROM_OLDEST:true}
+        stream: ${INPUT_KINESIS_STREAM}
+        timeout_ms: ${INPUT_KINESIS_TIMEOUT_MS:5000}
       mqtt:
         client_id: ${INPUT_MQTT_CLIENT_ID:benthos_input}
         qos: ${INPUT_MQTT_QOS:1}
@@ -143,6 +158,17 @@ input:
         channels:
         - ${INPUT_REDIS_PUBSUB_CHANNELS:benthos_chan}
         url: ${INPUT_REDIS_PUBSUB_URL:tcp://localhost:6379}
+      redis_streams:
+        body_key: ${INPUT_REDIS_STREAMS_BODY_KEY:body}
+        client_id: ${INPUT_REDIS_STREAMS_CLIENT_ID:benthos_consumer}
+        commit_period_ms: ${INPUT_REDIS_STREAMS_COMMIT_PERIOD_MS:1000}
+        consumer_group: ${INPUT_REDIS_STREAMS_CONSUMER_GROUP:benthos_group}
+        limit: ${INPUT_REDIS_STREAMS_LIMIT:10}
+        start_from_oldest: ${INPUT_REDIS_STREAMS_START_FROM_OLDEST:true}
+        streams:
+        - ${INPUT_REDIS_STREAMS_STREAMS:benthos_stream}
+        timeout_ms: ${INPUT_REDIS_STREAMS_TIMEOUT_MS:5000}
+        url: ${INPUT_REDIS_STREAMS_URL:tcp://localhost:6379}
       s3:
         bucket: ${INPUT_S3_BUCKET}
         credentials:
@@ -245,6 +271,8 @@ pipeline:
       output_format: ${PROCESSOR_GROK_OUTPUT_FORMAT:json}
       remove_empty_values: ${PROCESSOR_GROK_REMOVE_EMPTY_VALUES:true}
       use_default_patterns: ${PROCESSOR_GROK_USE_DEFAULT_PATTERNS:true}
+    hash:
+      algorithm: ${PROCESSOR_HASH_ALGORITHM:sha256}
     hash_sample:
       parts:
       - ${PROCESSOR_HASH_SAMPLE_PARTS:0}
@@ -294,6 +322,10 @@ pipeline:
       key: ${PROCESSOR_METADATA_KEY:example}
       operator: ${PROCESSOR_METADATA_OPERATOR:set}
       value: ${PROCESSOR_METADATA_VALUE:${!hostname}}
+    metric:
+      path: ${PROCESSOR_METRIC_PATH}
+      type: ${PROCESSOR_METRIC_TYPE:counter}
+      value: ${PROCESSOR_METRIC_VALUE}
     sample:
       retain: ${PROCESSOR_SAMPLE_RETAIN:10}
       seed: ${PROCESSOR_SAMPLE_SEED:0}
@@ -401,6 +433,16 @@ output:
           enabled: ${OUTPUT_KAFKA_TLS_ENABLED:false}
           skip_cert_verify: ${OUTPUT_KAFKA_TLS_SKIP_CERT_VERIFY:false}
         topic: ${OUTPUT_KAFKA_TOPIC:benthos_stream}
+      kinesis:
+        credentials:
+          id: ${OUTPUT_KINESIS_CREDENTIALS_ID}
+          role: ${OUTPUT_KINESIS_CREDENTIALS_ROLE}
+          secret: ${OUTPUT_KINESIS_CREDENTIALS_SECRET}
+          token: ${OUTPUT_KINESIS_CREDENTIALS_TOKEN}
+        hash_key: ${OUTPUT_KINESIS_HASH_KEY}
+        partition_key: ${OUTPUT_KINESIS_PARTITION_KEY}
+        region: ${OUTPUT_KINESIS_REGION:eu-west-1}
+        stream: ${OUTPUT_KINESIS_STREAM}
       mqtt:
         client_id: ${OUTPUT_MQTT_CLIENT_ID:benthos_output}
         qos: ${OUTPUT_MQTT_QOS:1}
@@ -434,6 +476,11 @@ output:
       redis_pubsub:
         channel: ${OUTPUT_REDIS_PUBSUB_CHANNEL:benthos_chan}
         url: ${OUTPUT_REDIS_PUBSUB_URL:tcp://localhost:6379}
+      redis_streams:
+        body_key: ${OUTPUT_REDIS_STREAMS_BODY_KEY:body}
+        max_length: ${OUTPUT_REDIS_STREAMS_MAX_LENGTH:0}
+        stream: ${OUTPUT_REDIS_STREAMS_STREAM:benthos_stream}
+        url: ${OUTPUT_REDIS_STREAMS_URL:tcp://localhost:6379}
       s3:
         bucket: ${OUTPUT_S3_BUCKET}
         credentials:

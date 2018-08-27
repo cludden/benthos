@@ -46,22 +46,24 @@ element will be selected, and so on.
 11. [`filter`](#filter)
 12. [`filter_parts`](#filter_parts)
 13. [`grok`](#grok)
-14. [`hash_sample`](#hash_sample)
-15. [`http`](#http)
-16. [`insert_part`](#insert_part)
-17. [`jmespath`](#jmespath)
-18. [`json`](#json)
-19. [`merge_json`](#merge_json)
-20. [`metadata`](#metadata)
-21. [`noop`](#noop)
-22. [`process_field`](#process_field)
-23. [`process_map`](#process_map)
-24. [`sample`](#sample)
-25. [`select_parts`](#select_parts)
-26. [`split`](#split)
-27. [`text`](#text)
-28. [`throttle`](#throttle)
-29. [`unarchive`](#unarchive)
+14. [`hash`](#hash)
+15. [`hash_sample`](#hash_sample)
+16. [`http`](#http)
+17. [`insert_part`](#insert_part)
+18. [`jmespath`](#jmespath)
+19. [`json`](#json)
+20. [`merge_json`](#merge_json)
+21. [`metadata`](#metadata)
+22. [`metric`](#metric)
+23. [`noop`](#noop)
+24. [`process_field`](#process_field)
+25. [`process_map`](#process_map)
+26. [`sample`](#sample)
+27. [`select_parts`](#select_parts)
+28. [`split`](#split)
+29. [`text`](#text)
+30. [`throttle`](#throttle)
+31. [`unarchive`](#unarchive)
 
 ## `archive`
 
@@ -149,28 +151,24 @@ combine:
   parts: 2
 ```
 
-If a message queue contains multiple part messages as individual parts it can
-be useful to 'squash' them back into a single message. We can then push it
-through a protocol that natively supports multiple part messages.
+Reads a number of discrete messages, buffering (but not acknowledging) the
+message parts until the size of the batch reaches or exceeds the target size.
 
-For example, if we started with N messages each containing M parts, pushed those
-messages into Kafka by splitting the parts. We could now consume our N*M
-messages from Kafka and squash them back into M part messages with the combine
-processor, and then subsequently push them into something like ZMQ.
+Once the size is reached or exceeded the parts are combined into a single batch
+of messages and sent through the pipeline. After reaching a destination the
+acknowledgment is sent out for all messages inside the batch at the same time,
+preserving at-least-once delivery guarantees.
 
-The metadata of the resulting batch will exactly match the metadata of the last
-message to enter the batch.
+When a batch is sent to an output the behaviour will differ depending on the
+protocol. If the output type supports multipart messages then the batch is sent
+as a single message with multiple parts. If the output only supports single part
+messages then the parts will be sent as a batch of single part messages. If the
+output supports neither multipart or batches of messages then Benthos falls back
+to sending them individually.
 
-If a message received has more parts than the 'combine' amount it will be sent
-unchanged with its original parts. This occurs even if there are cached parts
-waiting to be combined, which will change the ordering of message parts through
-the platform.
-
-When a message part is received that increases the total cached number of parts
-beyond the threshold it will have _all_ of its parts appended to the resuling
-message. E.g. if you set the threshold at 4 and send a message of 2 parts
-followed by a message of 3 parts then you will receive one output message of 5
-parts.
+If a Benthos stream contains multiple brokered inputs or outputs then the batch
+operator should *always* be applied directly after an input in order to avoid
+unexpected behaviour and message ordering.
 
 ## `compress`
 
@@ -364,6 +362,32 @@ valid output format.
 This processor respects type hints in the grok patterns, therefore with the
 pattern `%{WORD:first},%{INT:second:int}` and a payload of `foo,1`
 the resulting payload would be `{"first":"foo","second":1}`.
+
+## `hash`
+
+``` yaml
+type: hash
+hash:
+  algorithm: sha256
+  parts: []
+```
+
+Hashes parts of a message according to the selected algorithm. Supported
+algorithms are: sha256, sha512, xxhash64.
+
+This processor is mostly useful when combined with the
+[`process_field`](#process_field) processor as it allows you to hash a
+specific field of a document like this:
+
+``` yaml
+# Hash the contents of 'foo.bar'
+process_field:
+  path: foo.bar
+  processors:
+  - type: hash
+    hash:
+      algorithm: sha256
+```
 
 ## `hash_sample`
 
@@ -648,6 +672,82 @@ Removes all metadata values from the message.
 
 Removes all metadata values from the message where the key is prefixed with the
 value provided.
+
+## `metric`
+
+``` yaml
+type: metric
+metric:
+  labels: {}
+  path: ""
+  type: counter
+  value: ""
+```
+
+Creates metrics by extracting values from messages.
+
+The `path` field should be a dot separated path of the metric to be
+set and will automatically be converted into the correct format of the
+configured metric aggregator.
+
+The `value` field can be set using function interpolations described
+[here](../config_interpolation.md#functions) and is used according to the
+specific type.
+
+### Types
+
+#### `counter`
+
+Increments a counter by exactly 1, the contents of `value` are ignored
+by this type.
+
+#### `counter_parts`
+
+Increments a counter by the number of parts within the message batch, the
+contents of `value` are ignored by this type.
+
+#### `counter_by`
+
+If the contents of `value` can be parsed as a positive integer value
+then the counter is incremented by this value.
+
+For example, the following configuration will increment the value of the
+`count.custom.field` metric by the contents of `field.some.value`:
+
+``` yaml
+type: metric
+metric:
+  type: counter_by
+  path: count.custom.field
+  value: ${!json_field:field.some.value}
+```
+
+#### `gauge`
+
+If the contents of `value` can be parsed as a positive integer value
+then the gauge is set to this value.
+
+For example, the following configuration will set the value of the
+`gauge.custom.field` metric to the contents of `field.some.value`:
+
+``` yaml
+type: metric
+metric:
+  type: gauge
+  path: gauge.custom.field
+  value: ${!json_field:field.some.value}
+```
+
+#### `timing`
+
+Equivalent to `gauge` where instead the metric is a timing.
+
+### Labels
+
+Some metrics aggregators, such as Prometheus, support arbitrary labels, in which
+case the `labels` field can be used in order to create them. Label
+values can also be set using function interpolations in order to dynamically
+populate them with context about the message.
 
 ## `noop`
 

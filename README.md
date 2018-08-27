@@ -29,7 +29,7 @@ for choosing a level of resiliency that meets your needs.
 
 ## Supported Sources & Sinks
 
-- [Amazon (S3, SQS)][amazons3]
+- [AWS (S3, SQS, Kinesis)][aws]
 - [Elasticsearch][elasticsearch] (output only)
 - File
 - HTTP(S)
@@ -40,7 +40,7 @@ for choosing a level of resiliency that meets your needs.
 - [NATS Streaming][natsstreaming]
 - [NSQ][nsq]
 - [RabbitMQ (AMQP 0.91)][rabbitmq]
-- [Redis][redis]
+- [Redis (streams, list, pubsub)][redis]
 - Stdin/Stdout
 - Websocket
 - [ZMQ4][zmq]
@@ -167,6 +167,10 @@ install libzmq4 and use the compile time flag when building Benthos:
 make TAGS=ZMQ4
 ```
 
+## Contributing
+
+Contributions are welcome, please [read the guidelines](CONTRIBUTING.md).
+
 [inputs]: docs/inputs/README.md
 [buffers]: docs/buffers/README.md
 [processors]: docs/processors/README.md
@@ -192,7 +196,7 @@ make TAGS=ZMQ4
 [travis-url]: https://travis-ci.org/Jeffail/benthos
 
 [dep]: https://github.com/golang/dep
-[amazons3]: https://aws.amazon.com/s3/
+[aws]: https://aws.amazon.com/
 [zmq]: http://zeromq.org/
 [nanomsg]: http://nanomsg.org/
 [rabbitmq]: https://www.rabbitmq.com/

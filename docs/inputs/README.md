@@ -46,19 +46,20 @@ level which is only applied to messages from the baz input.
 8. [`inproc`](#inproc)
 9. [`kafka`](#kafka)
 10. [`kafka_balanced`](#kafka_balanced)
-11. [`mqtt`](#mqtt)
-12. [`nanomsg`](#nanomsg)
-13. [`nats`](#nats)
-14. [`nats_stream`](#nats_stream)
-15. [`nsq`](#nsq)
-16. [`read_until`](#read_until)
-17. [`redis_list`](#redis_list)
-18. [`redis_pubsub`](#redis_pubsub)
-19. [`s3`](#s3)
-20. [`sqs`](#sqs)
-21. [`stdin`](#stdin)
-22. [`websocket`](#websocket)
-23. [`zmq4`](#zmq4)
+11. [`kinesis`](#kinesis)
+12. [`mqtt`](#mqtt)
+13. [`nanomsg`](#nanomsg)
+14. [`nats`](#nats)
+15. [`nats_stream`](#nats_stream)
+16. [`nsq`](#nsq)
+17. [`read_until`](#read_until)
+18. [`redis_list`](#redis_list)
+19. [`redis_pubsub`](#redis_pubsub)
+20. [`redis_streams`](#redis_streams)
+21. [`s3`](#s3)
+22. [`sqs`](#sqs)
+23. [`stdin`](#stdin)
+24. [`websocket`](#websocket)
 
 ## `amqp`
 
@@ -435,6 +436,34 @@ This input adds the following metadata fields to each message:
 You can access these metadata fields using
 [function interpolation](../config_interpolation.md#metadata).
 
+## `kinesis`
+
+``` yaml
+type: kinesis
+kinesis:
+  client_id: benthos_consumer
+  commit_period_ms: 1000
+  credentials:
+    id: ""
+    role: ""
+    secret: ""
+    token: ""
+  dynamodb_table: ""
+  limit: 100
+  region: eu-west-1
+  shard: "0"
+  start_from_oldest: true
+  stream: ""
+  timeout_ms: 5000
+```
+
+Receive messages from a Kinesis stream.
+
+It's possible to use DynamoDB for persisting shard iterators by setting the
+table name. Offsets will then be tracked per `client_id` per
+`shard_id`. When using this mode you should create a table with
+`namespace` as the primary key and `shard_id` as a sort key.
+
 ## `mqtt`
 
 ``` yaml
@@ -618,6 +647,34 @@ redis_pubsub:
 Redis supports a publish/subscribe model, it's possible to subscribe to multiple
 channels using this input.
 
+## `redis_streams`
+
+``` yaml
+type: redis_streams
+redis_streams:
+  body_key: body
+  client_id: benthos_consumer
+  commit_period_ms: 1000
+  consumer_group: benthos_group
+  limit: 10
+  start_from_oldest: true
+  streams:
+  - benthos_stream
+  timeout_ms: 5000
+  url: tcp://localhost:6379
+```
+
+Pulls messages from Redis (v5.0+) streams with the XREADGROUP command. The
+`client_id` should be unique for each consumer of a group.
+
+The field `limit` specifies the maximum number of records to be
+received per request. When more than one record is returned they are batched and
+can be split into individual messages with the `split` processor.
+
+Redis stream entries are key/value pairs, as such it is necessary to specify the
+key that contains the body of the message. All other keys/value pairs are saved
+as metadata fields.
+
 ## `s3`
 
 ``` yaml
@@ -724,26 +781,3 @@ websocket:
 ```
 
 Sends messages to an HTTP server via a websocket connection.
-
-## `zmq4`
-
-``` yaml
-type: zmq4
-zmq4:
-  bind: false
-  high_water_mark: 0
-  poll_timeout_ms: 5000
-  socket_type: PULL
-  sub_filters: []
-  urls:
-  - tcp://localhost:5555
-```
-
-ZMQ4 is supported but currently depends on C bindings. Since this is an
-annoyance when building or using Benthos it is not compiled by default.
-
-Build it into your project by getting libzmq installed on your machine, then
-build with the tag: 'go install -tags "ZMQ4" github.com/Jeffail/benthos/cmd/...'
-
-ZMQ4 input supports PULL and SUB sockets only. If there is demand for other
-socket types then they can be added easily.

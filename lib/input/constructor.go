@@ -71,6 +71,7 @@ const (
 	TypeInproc        = "inproc"
 	TypeKafka         = "kafka"
 	TypeKafkaBalanced = "kafka_balanced"
+	TypeKinesis       = "kinesis"
 	TypeMQTT          = "mqtt"
 	TypeMySQL         = "mysql"
 	TypeNanomsg       = "nanomsg"
@@ -80,6 +81,7 @@ const (
 	TypeReadUntil     = "read_until"
 	TypeRedisList     = "redis_list"
 	TypeRedisPubSub   = "redis_pubsub"
+	TypeRedisStreams  = "redis_streams"
 	TypeS3            = "s3"
 	TypeSQS           = "sqs"
 	TypeSTDIN         = "stdin"
@@ -102,6 +104,7 @@ type Config struct {
 	Inproc        InprocConfig               `json:"inproc" yaml:"inproc"`
 	Kafka         reader.KafkaConfig         `json:"kafka" yaml:"kafka"`
 	KafkaBalanced reader.KafkaBalancedConfig `json:"kafka_balanced" yaml:"kafka_balanced"`
+	Kinesis       reader.KinesisConfig       `json:"kinesis" yaml:"kinesis"`
 	MQTT          reader.MQTTConfig          `json:"mqtt" yaml:"mqtt"`
 	MySQL         reader.MySQLConfig         `json:"mysql" yaml:"mysql"`
 	Nanomsg       reader.ScaleProtoConfig    `json:"nanomsg" yaml:"nanomsg"`
@@ -111,6 +114,7 @@ type Config struct {
 	ReadUntil     ReadUntilConfig            `json:"read_until" yaml:"read_until"`
 	RedisList     reader.RedisListConfig     `json:"redis_list" yaml:"redis_list"`
 	RedisPubSub   reader.RedisPubSubConfig   `json:"redis_pubsub" yaml:"redis_pubsub"`
+	RedisStreams  reader.RedisStreamsConfig  `json:"redis_streams" yaml:"redis_streams"`
 	S3            reader.AmazonS3Config      `json:"s3" yaml:"s3"`
 	SQS           reader.AmazonSQSConfig     `json:"sqs" yaml:"sqs"`
 	STDIN         STDINConfig                `json:"stdin" yaml:"stdin"`
@@ -133,6 +137,7 @@ func NewConfig() Config {
 		Inproc:        NewInprocConfig(),
 		Kafka:         reader.NewKafkaConfig(),
 		KafkaBalanced: reader.NewKafkaBalancedConfig(),
+		Kinesis:       reader.NewKinesisConfig(),
 		MQTT:          reader.NewMQTTConfig(),
 		MySQL:         reader.NewMySQLConfig(),
 		Nanomsg:       reader.NewScaleProtoConfig(),
@@ -142,6 +147,7 @@ func NewConfig() Config {
 		ReadUntil:     NewReadUntilConfig(),
 		RedisList:     reader.NewRedisListConfig(),
 		RedisPubSub:   reader.NewRedisPubSubConfig(),
+		RedisStreams:  reader.NewRedisStreamsConfig(),
 		S3:            reader.NewAmazonS3Config(),
 		SQS:           reader.NewAmazonSQSConfig(),
 		STDIN:         NewSTDINConfig(),

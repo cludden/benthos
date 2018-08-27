@@ -123,6 +123,19 @@ INPUT_KAFKA_TLS_CAS_FILE
 INPUT_KAFKA_TLS_ENABLED                     = false
 INPUT_KAFKA_TLS_SKIP_CERT_VERIFY            = false
 INPUT_KAFKA_TOPIC                           = benthos_stream
+INPUT_KINESIS_CLIENT_ID                     = benthos_consumer
+INPUT_KINESIS_COMMIT_PERIOD_MS              = 1000
+INPUT_KINESIS_CREDENTIALS_ID
+INPUT_KINESIS_CREDENTIALS_ROLE
+INPUT_KINESIS_CREDENTIALS_SECRET
+INPUT_KINESIS_CREDENTIALS_TOKEN
+INPUT_KINESIS_DYNAMODB_TABLE
+INPUT_KINESIS_LIMIT                         = 100
+INPUT_KINESIS_REGION                        = eu-west-1
+INPUT_KINESIS_SHARD                         = 0
+INPUT_KINESIS_START_FROM_OLDEST             = true
+INPUT_KINESIS_STREAM
+INPUT_KINESIS_TIMEOUT_MS                    = 5000
 INPUT_MQTT_CLIENT_ID                        = benthos_input
 INPUT_MQTT_QOS                              = 1
 INPUT_MQTT_TOPICS                           = benthos_topic
@@ -152,6 +165,15 @@ INPUT_REDIS_LIST_TIMEOUT_MS                 = 5000
 INPUT_REDIS_LIST_URL                        = tcp://localhost:6379
 INPUT_REDIS_PUBSUB_CHANNELS                 = benthos_chan
 INPUT_REDIS_PUBSUB_URL                      = tcp://localhost:6379
+INPUT_REDIS_STREAMS_BODY_KEY                = body
+INPUT_REDIS_STREAMS_CLIENT_ID               = benthos_consumer
+INPUT_REDIS_STREAMS_COMMIT_PERIOD_MS        = 1000
+INPUT_REDIS_STREAMS_CONSUMER_GROUP          = benthos_group
+INPUT_REDIS_STREAMS_LIMIT                   = 10
+INPUT_REDIS_STREAMS_START_FROM_OLDEST       = true
+INPUT_REDIS_STREAMS_STREAMS                 = benthos_stream
+INPUT_REDIS_STREAMS_TIMEOUT_MS              = 5000
+INPUT_REDIS_STREAMS_URL                     = tcp://localhost:6379
 INPUT_S3_BUCKET
 INPUT_S3_CREDENTIALS_ID
 INPUT_S3_CREDENTIALS_ROLE
@@ -237,6 +259,7 @@ PROCESSOR_GROK_NAMED_CAPTURES_ONLY               = true
 PROCESSOR_GROK_OUTPUT_FORMAT                     = json
 PROCESSOR_GROK_REMOVE_EMPTY_VALUES               = true
 PROCESSOR_GROK_USE_DEFAULT_PATTERNS              = true
+PROCESSOR_HASH_ALGORITHM                         = sha256
 PROCESSOR_HASH_SAMPLE_PARTS                      = 0
 PROCESSOR_HASH_SAMPLE_RETAIN_MAX                 = 10
 PROCESSOR_HASH_SAMPLE_RETAIN_MIN                 = 0
@@ -272,6 +295,9 @@ PROCESSOR_MERGE_JSON_RETAIN_PARTS                = false
 PROCESSOR_METADATA_KEY                           = example
 PROCESSOR_METADATA_OPERATOR                      = set
 PROCESSOR_METADATA_VALUE                         = ${!hostname}
+PROCESSOR_METRIC_PATH
+PROCESSOR_METRIC_TYPE                            = counter
+PROCESSOR_METRIC_VALUE
 PROCESSOR_SAMPLE_RETAIN                          = 10
 PROCESSOR_SAMPLE_SEED                            = 0
 PROCESSOR_SELECT_PARTS_PARTS                     = 0
@@ -355,6 +381,14 @@ OUTPUT_KAFKA_TLS_CAS_FILE
 OUTPUT_KAFKA_TLS_ENABLED                     = false
 OUTPUT_KAFKA_TLS_SKIP_CERT_VERIFY            = false
 OUTPUT_KAFKA_TOPIC                           = benthos_stream
+OUTPUT_KINESIS_CREDENTIALS_ID
+OUTPUT_KINESIS_CREDENTIALS_ROLE
+OUTPUT_KINESIS_CREDENTIALS_SECRET
+OUTPUT_KINESIS_CREDENTIALS_TOKEN
+OUTPUT_KINESIS_HASH_KEY
+OUTPUT_KINESIS_PARTITION_KEY
+OUTPUT_KINESIS_REGION                        = eu-west-1
+OUTPUT_KINESIS_STREAM
 OUTPUT_MQTT_CLIENT_ID                        = benthos_output
 OUTPUT_MQTT_QOS                              = 1
 OUTPUT_MQTT_TOPIC                            = benthos_topic
@@ -377,6 +411,10 @@ OUTPUT_REDIS_LIST_KEY                        = benthos_list
 OUTPUT_REDIS_LIST_URL                        = tcp://localhost:6379
 OUTPUT_REDIS_PUBSUB_CHANNEL                  = benthos_chan
 OUTPUT_REDIS_PUBSUB_URL                      = tcp://localhost:6379
+OUTPUT_REDIS_STREAMS_BODY_KEY                = body
+OUTPUT_REDIS_STREAMS_MAX_LENGTH              = 0
+OUTPUT_REDIS_STREAMS_STREAM                  = benthos_stream
+OUTPUT_REDIS_STREAMS_URL                     = tcp://localhost:6379
 OUTPUT_S3_BUCKET
 OUTPUT_S3_CREDENTIALS_ID
 OUTPUT_S3_CREDENTIALS_ROLE

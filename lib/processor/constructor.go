@@ -68,6 +68,7 @@ const (
 	TypeFilter       = "filter"
 	TypeFilterParts  = "filter_parts"
 	TypeGrok         = "grok"
+	TypeHash         = "hash"
 	TypeHashSample   = "hash_sample"
 	TypeHTTP         = "http"
 	TypeInsertPart   = "insert_part"
@@ -75,6 +76,7 @@ const (
 	TypeJSON         = "json"
 	TypeMergeJSON    = "merge_json"
 	TypeMetadata     = "metadata"
+	TypeMetric       = "metric"
 	TypeNoop         = "noop"
 	TypeProcessField = "process_field"
 	TypeProcessMap   = "process_map"
@@ -104,6 +106,7 @@ type Config struct {
 	Filter       FilterConfig       `json:"filter" yaml:"filter"`
 	FilterParts  FilterPartsConfig  `json:"filter_parts" yaml:"filter_parts"`
 	Grok         GrokConfig         `json:"grok" yaml:"grok"`
+	Hash         HashConfig         `json:"hash" yaml:"hash"`
 	HashSample   HashSampleConfig   `json:"hash_sample" yaml:"hash_sample"`
 	HTTP         HTTPConfig         `json:"http" yaml:"http"`
 	InsertPart   InsertPartConfig   `json:"insert_part" yaml:"insert_part"`
@@ -111,6 +114,7 @@ type Config struct {
 	JSON         JSONConfig         `json:"json" yaml:"json"`
 	MergeJSON    MergeJSONConfig    `json:"merge_json" yaml:"merge_json"`
 	Metadata     MetadataConfig     `json:"metadata" yaml:"metadata"`
+	Metric       MetricConfig       `json:"metric" yaml:"metric"`
 	ProcessField ProcessFieldConfig `json:"process_field" yaml:"process_field"`
 	ProcessMap   ProcessMapConfig   `json:"process_map" yaml:"process_map"`
 	Sample       SampleConfig       `json:"sample" yaml:"sample"`
@@ -138,6 +142,7 @@ func NewConfig() Config {
 		Filter:       NewFilterConfig(),
 		FilterParts:  NewFilterPartsConfig(),
 		Grok:         NewGrokConfig(),
+		Hash:         NewHashConfig(),
 		HashSample:   NewHashSampleConfig(),
 		HTTP:         NewHTTPConfig(),
 		InsertPart:   NewInsertPartConfig(),
@@ -145,6 +150,7 @@ func NewConfig() Config {
 		JSON:         NewJSONConfig(),
 		MergeJSON:    NewMergeJSONConfig(),
 		Metadata:     NewMetadataConfig(),
+		Metric:       NewMetricConfig(),
 		ProcessField: NewProcessFieldConfig(),
 		ProcessMap:   NewProcessMapConfig(),
 		Sample:       NewSampleConfig(),

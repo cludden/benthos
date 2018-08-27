@@ -102,6 +102,21 @@ input:
       enabled: false
       cas_file: ""
       skip_cert_verify: false
+  kinesis:
+    region: eu-west-1
+    credentials:
+      id: ""
+      secret: ""
+      token: ""
+      role: ""
+    limit: 100
+    stream: ""
+    shard: "0"
+    dynamodb_table: ""
+    client_id: benthos_consumer
+    commit_period_ms: 1000
+    start_from_oldest: true
+    timeout_ms: 5000
   mqtt:
     urls:
     - tcp://localhost:1883
@@ -172,6 +187,17 @@ input:
     url: tcp://localhost:6379
     channels:
     - benthos_chan
+  redis_streams:
+    url: tcp://localhost:6379
+    body_key: body
+    streams:
+    - benthos_stream
+    consumer_group: benthos_group
+    client_id: benthos_consumer
+    limit: 10
+    start_from_oldest: true
+    commit_period_ms: 1000
+    timeout_ms: 5000
   s3:
     region: eu-west-1
     bucket: ""
@@ -215,14 +241,6 @@ input:
       enabled: false
       username: ""
       password: ""
-  zmq4:
-    urls:
-    - tcp://localhost:5555
-    bind: false
-    socket_type: PULL
-    sub_filters: []
-    high_water_mark: 0
-    poll_timeout_ms: 5000
   processors: []
 buffer:
   type: none
@@ -370,6 +388,9 @@ pipeline:
       named_captures_only: true
       use_default_patterns: true
       output_format: json
+    hash:
+      parts: []
+      algorithm: sha256
     hash_sample:
       retain_min: 0
       retain_max: 10
@@ -424,6 +445,11 @@ pipeline:
       operator: set
       key: example
       value: ${!hostname}
+    metric:
+      type: counter
+      path: ""
+      labels: {}
+      value: ""
     process_field:
       parts: []
       path: ""
@@ -547,6 +573,16 @@ output:
       enabled: false
       cas_file: ""
       skip_cert_verify: false
+  kinesis:
+    region: eu-west-1
+    stream: ""
+    hash_key: ""
+    partition_key: ""
+    credentials:
+      id: ""
+      secret: ""
+      token: ""
+      role: ""
   mqtt:
     urls:
     - tcp://localhost:1883
@@ -580,6 +616,11 @@ output:
   redis_pubsub:
     url: tcp://localhost:6379
     channel: benthos_chan
+  redis_streams:
+    url: tcp://localhost:6379
+    stream: benthos_stream
+    body_key: body
+    max_length: 0
   s3:
     region: eu-west-1
     bucket: ""
@@ -613,13 +654,6 @@ output:
       enabled: false
       username: ""
       password: ""
-  zmq4:
-    urls:
-    - tcp://*:5556
-    bind: true
-    socket_type: PUSH
-    high_water_mark: 0
-    poll_timeout_ms: 5000
   processors: []
 resources:
   caches:
