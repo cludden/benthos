@@ -52,6 +52,7 @@ var (
 
 // KinesisConfig contains configuration fields for the output Kinesis type.
 type KinesisConfig struct {
+	Endpoint     string                     `json:"endpoint" yaml:"endpoint"`
 	Region       string                     `json:"region" yaml:"region"`
 	Stream       string                     `json:"stream" yaml:"stream"`
 	HashKey      string                     `json:"hash_key" yaml:"hash_key"`
@@ -85,6 +86,7 @@ type Kinesis struct {
 	kinesis kinesisiface.KinesisAPI
 
 	backoff      backoff.BackOff
+	endpoint     *string
 	hashKey      *text.InterpolatedString
 	partitionKey *text.InterpolatedString
 	streamName   *string
@@ -102,6 +104,7 @@ func NewKinesis(
 	if len(conf.PartitionKey) == 0 {
 		return nil, errors.New("partition key must not be empty")
 	}
+
 	return &Kinesis{
 		conf:         conf,
 		log:          log.NewModule(".output.kinesis"),
@@ -114,10 +117,11 @@ func NewKinesis(
 
 //------------------------------------------------------------------------------
 
-// toRecords converts an individual benthos message into a slice of Kinesis batch
-// put entries by promoting each message part into a single part message and
-// passing each new message to the partition and hash key interpolation process,
-// allowing the user to define the partition and hash key per message part
+// toRecords converts an individual benthos message into a slice of Kinesis
+// batch put entries by promoting each message part into a single part message
+// and passing each new message through the partition and hash key interpolation
+// process, allowing the user to define the partition and hash key per message
+// part.
 func (a *Kinesis) toRecords(msg types.Message) ([]*kinesis.PutRecordsRequestEntry, error) {
 	entries := make([]*kinesis.PutRecordsRequestEntry, msg.Len())
 
@@ -158,6 +162,9 @@ func (a *Kinesis) Connect() error {
 	awsConf := aws.NewConfig()
 	if len(a.conf.Region) > 0 {
 		awsConf = awsConf.WithRegion(a.conf.Region)
+	}
+	if len(a.conf.Endpoint) > 0 {
+		awsConf = awsConf.WithEndpoint(a.conf.Endpoint)
 	}
 	if len(a.conf.Credentials.ID) > 0 {
 		awsConf = awsConf.WithCredentials(credentials.NewStaticCredentials(
@@ -209,36 +216,26 @@ func (a *Kinesis) Write(msg types.Message) error {
 		StreamName: a.streamName,
 	}
 
-	var output *kinesis.PutRecordsOutput
-	var innererr error
 	var failed []*kinesis.PutRecordsRequestEntry
 	a.backoff.Reset()
 	for len(input.Records) > 0 {
-		// batch write records
-		err := backoff.Retry(func() error {
-			// batch write to kinesis
-			output, innererr = a.kinesis.PutRecords(input)
-			if innererr != nil {
-				a.log.Warnf("kinesis error: %v\n", innererr)
-				// bail if a message is too large
-				if msg := innererr.Error(); kinesisPayloadLimitExceeded.MatchString(msg) {
-					innererr = types.ErrMessageTooLarge
-					return nil
-				}
-			}
-			return innererr
-		}, a.backoff)
+		wait := a.backoff.NextBackOff()
 
-		// handle non retryable error
-		if err == nil {
-			err = innererr
-		}
+		// batch write to kinesis
+		output, err := a.kinesis.PutRecords(input)
 		if err != nil {
-			a.log.Errorf("kinesis error: %v\n", err)
-			return err
+			a.log.Warnf("kinesis error: %v\n", err)
+			// bail if a message is too large or all retry attempts expired
+			if msg := err.Error(); kinesisPayloadLimitExceeded.MatchString(msg) {
+				err = types.ErrMessageTooLarge
+				return err
+			} else if wait == backoff.Stop {
+				return err
+			}
+			continue
 		}
 
-		// retry any individual records that failed due to throttling
+		// retry any individual records that failed
 		failed = nil
 		if output.FailedRecordCount != nil {
 			for i, entry := range output.Records {
