@@ -110,6 +110,7 @@ This input adds the following metadata fields to each message:
 
 ` + "```" + `
 - mysql_event_keys
+- mysql_event_pos
 - mysql_event_schema
 - mysql_event_table
 - mysql_log_position

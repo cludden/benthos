@@ -39,13 +39,14 @@ const (
 )
 
 var (
-	metaMysqlEventKeys   = "mysql_event_keys"
-	metaMysqlEventSchema = "mysql_event_schema"
-	metaMysqlEventTable  = "mysql_event_table"
-	metaMysqlEventType   = "mysql_event_type"
-	metaMysqlFile        = "mysql_file"
-	metaMysqlNextPos     = "mysql_next_pos"
-	metaMysqlServerID    = "mysql_server_id"
+	metaMysqlEventKeys     = "mysql_event_keys"
+	metaMysqlEventPosition = "mysql_event_pos"
+	metaMysqlEventSchema   = "mysql_event_schema"
+	metaMysqlEventTable    = "mysql_event_table"
+	metaMysqlEventType     = "mysql_event_type"
+	metaMysqlFile          = "mysql_file"
+	metaMysqlNextPos       = "mysql_next_pos"
+	metaMysqlServerID      = "mysql_server_id"
 )
 
 //------------------------------------------------------------------------------
@@ -313,7 +314,6 @@ func (m *MySQL) parse(e *canal.RowsEvent, log string) (*MysqlMessage, error) {
 	if e.Header != nil {
 		msg.Timestamp = time.Unix(int64(e.Header.Timestamp), 0).UTC()
 		msg.Pos = e.Header.LogPos - e.Header.EventSize
-		fmt.Println("pos", msg.Pos, " from ", e.Header.LogPos, e.Header.EventSize)
 	}
 
 	var before, after *gabs.Container
@@ -497,6 +497,7 @@ func (m *MySQL) toPart(e *canal.RowsEvent, log string) (*message.Part, error) {
 	meta := part.Metadata()
 	meta.Set(metaMysqlEventKeys, base64.StdEncoding.EncodeToString(record.Keys))
 	meta.Set(metaMysqlFile, log)
+	meta.Set(metaMysqlEventPosition, strconv.FormatUint(uint64(record.Pos), 10))
 	meta.Set(metaMysqlEventSchema, e.Table.Schema)
 	meta.Set(metaMysqlEventTable, e.Table.Name)
 	meta.Set(metaMysqlEventType, e.Action)
@@ -573,6 +574,10 @@ func (m *MySQL) Connect() error {
 			return c.Run()
 		}
 	} else {
+		m.lastPosition = mysql.Position{
+			Name: pos.Log,
+			Pos:  pos.Position,
+		}
 		start = func(c *canal.Canal) error {
 			return c.RunFrom(mysql.Position{
 				Name: pos.Log,
