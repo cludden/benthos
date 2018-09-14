@@ -597,11 +597,12 @@ func (m *MySQL) Connect() error {
 
 // Read attempts to read a new message from MySQL.
 func (m *MySQL) Read() (types.Message, error) {
+	var msg types.Message
 	var n int
-	msg := message.New(nil)
 
 	// requeue any unacknowledged message parts
 	if l := len(m.unacked); l > 0 {
+		msg = message.New(nil)
 		for i := 0; i < l && n < m.batchSize; i++ {
 			msg.Append(m.unacked[i])
 			n++
@@ -616,6 +617,9 @@ func (m *MySQL) Read() (types.Message, error) {
 				return nil, types.ErrTypeClosed
 			}
 			m.unacked = append(m.unacked, part)
+			if msg == nil {
+				msg = message.New(nil)
+			}
 			msg.Append(part)
 			n++
 		case <-m.interruptChan:
