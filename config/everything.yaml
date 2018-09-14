@@ -164,6 +164,7 @@ input:
     urls:
     - nats://localhost:4222
     subject: benthos_messages
+    queue: benthos_queue
   nats_stream:
     urls:
     - nats://localhost:4222
@@ -193,6 +194,10 @@ input:
         min_parts: 1
         max_part_size: 1073741824
         min_part_size: 1
+      check_field:
+        parts: []
+        path: ""
+        condition: {}
       count:
         arg: 100
       jmespath:
@@ -303,6 +308,10 @@ pipeline:
           min_parts: 1
           max_part_size: 1073741824
           min_part_size: 1
+        check_field:
+          parts: []
+          path: ""
+          condition: {}
         count:
           arg: 100
         jmespath:
@@ -343,6 +352,10 @@ pipeline:
           min_parts: 1
           max_part_size: 1073741824
           min_part_size: 1
+        check_field:
+          parts: []
+          path: ""
+          condition: {}
         count:
           arg: 100
         jmespath:
@@ -388,6 +401,10 @@ pipeline:
         min_parts: 1
         max_part_size: 1073741824
         min_part_size: 1
+      check_field:
+        parts: []
+        path: ""
+        condition: {}
       count:
         arg: 100
       jmespath:
@@ -415,6 +432,10 @@ pipeline:
         min_parts: 1
         max_part_size: 1073741824
         min_part_size: 1
+      check_field:
+        parts: []
+        path: ""
+        condition: {}
       count:
         arg: 100
       jmespath:
@@ -769,6 +790,10 @@ resources:
         min_parts: 1
         max_part_size: 1073741824
         min_part_size: 1
+      check_field:
+        parts: []
+        path: ""
+        condition: {}
       count:
         arg: 100
       jmespath:

@@ -6,13 +6,11 @@
 		"debug_endpoints": false
 	},
 	"input": {
-		"type": "nats",
-		"nats": {
-			"queue": "benthos_queue",
-			"subject": "benthos_messages",
-			"urls": [
-				"nats://localhost:4222"
-			]
+		"type": "stdin",
+		"stdin": {
+			"delimiter": "",
+			"max_buffer": 1000000,
+			"multipart": false
 		}
 	},
 	"buffer": {
@@ -20,16 +18,25 @@
 		"none": {}
 	},
 	"pipeline": {
-		"processors": [],
+		"processors": [
+			{
+				"type": "filter_parts",
+				"filter_parts": {
+					"type": "check_field",
+					"check_field": {
+						"condition": {},
+						"parts": [],
+						"path": ""
+					}
+				}
+			}
+		],
 		"threads": 1
 	},
 	"output": {
-		"type": "nats",
-		"nats": {
-			"subject": "benthos_messages",
-			"urls": [
-				"nats://localhost:4222"
-			]
+		"type": "stdout",
+		"stdout": {
+			"delimiter": ""
 		}
 	},
 	"resources": {
