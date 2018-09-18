@@ -126,12 +126,13 @@ type MySQL struct {
 	bufferTimeout    time.Duration
 	canal            *canal.Canal
 	closed           chan error
-	internalMessages chan *message.Part
+	internalMessages chan *mysqlEntry
 	interruptChan    chan struct{}
 	key              string
 	lastPosition     mysql.Position
 	syncInterval     time.Duration
 	unacked          []*message.Part
+	unackedPos       *mysql.Position
 
 	conf  MySQLConfig
 	cache types.Cache
@@ -149,7 +150,7 @@ func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metric
 		closed:           make(chan error, 2),
 		conf:             conf,
 		cache:            cache,
-		internalMessages: make(chan *message.Part, conf.PrefetchCount),
+		internalMessages: make(chan *mysqlEntry, conf.PrefetchCount),
 		stats:            stats,
 		log:              log.NewModule(".input.mysql"),
 	}
@@ -281,7 +282,11 @@ func (m *MySQL) marshalRowSummary(table *schema.Table, row []interface{}) *gabs.
 
 // OnPosSynced handles a MySQL binlog position event
 func (m *MySQL) OnPosSynced(pos mysql.Position, force bool) error {
-	m.lastPosition = pos
+	select {
+	case m.internalMessages <- &mysqlEntry{pos: &pos}:
+		m.lastPosition = pos
+	case <-m.interruptChan:
+	}
 	return nil
 }
 
@@ -295,7 +300,7 @@ func (m *MySQL) OnRow(e *canal.RowsEvent) error {
 	}
 
 	select {
-	case m.internalMessages <- part:
+	case m.internalMessages <- &mysqlEntry{part: part}:
 	case <-m.interruptChan:
 	}
 
@@ -525,23 +530,15 @@ func (m *MySQL) Acknowledge(err error) error {
 		return nil
 	}
 
-	// retrieve last unacked part
-	last := m.unacked[l-1]
-	meta := last.Metadata()
-	log := meta.Get(metaMysqlFile)
-	if log == mysqlDumpLog {
+	// retrieve last unacked position
+	pos := m.unackedPos
+	if pos == nil {
 		m.unacked = nil
 		return nil
 	}
 
-	// build commit offset using last unacked part
-	var pos mysql.Position
-	pos.Name = log
-	offset, _ := strconv.ParseUint(meta.Get(metaMysqlNextPos), 10, 32)
-	pos.Pos = uint32(offset)
-
 	// send position and clear unacked
-	m.ack <- pos
+	m.ack <- *pos
 	m.unacked = nil
 
 	return nil
@@ -610,18 +607,22 @@ func (m *MySQL) Read() (types.Message, error) {
 	}
 
 	// if message empty, block until at least one part has been read
-	if n == 0 {
+	for n == 0 {
 		select {
-		case part, ok := <-m.internalMessages:
+		case entry, ok := <-m.internalMessages:
 			if !ok {
 				return nil, types.ErrTypeClosed
 			}
-			m.unacked = append(m.unacked, part)
-			if msg == nil {
-				msg = message.New(nil)
+			if entry.part == nil {
+				m.unackedPos = entry.pos
+			} else {
+				m.unacked = append(m.unacked, entry.part)
+				if msg == nil {
+					msg = message.New(nil)
+				}
+				msg.Append(entry.part)
+				n++
 			}
-			msg.Append(part)
-			n++
 		case <-m.interruptChan:
 			return nil, types.ErrTypeClosed
 		}
@@ -638,13 +639,20 @@ func (m *MySQL) Read() (types.Message, error) {
 batch:
 	for n < m.batchSize {
 		select {
-		case part, ok := <-m.internalMessages:
+		case entry, ok := <-m.internalMessages:
 			if !ok {
 				return nil, types.ErrTypeClosed
 			}
-			m.unacked = append(m.unacked, part)
-			msg.Append(part)
-			n++
+			if entry.part == nil {
+				m.unackedPos = entry.pos
+			} else {
+				m.unacked = append(m.unacked, entry.part)
+				if msg == nil {
+					msg = message.New(nil)
+				}
+				msg.Append(entry.part)
+				n++
+			}
 		case <-bufferTimer.C:
 			break batch
 		case <-m.interruptChan:
@@ -668,6 +676,12 @@ func (m *MySQL) WaitForClose(timeout time.Duration) error {
 }
 
 //------------------------------------------------------------------------------
+
+// mysqlEntry is an internal queue entry
+type mysqlEntry struct {
+	pos  *mysql.Position
+	part *message.Part
+}
 
 // MysqlMessage represents a single mysql binlog row event
 type MysqlMessage struct {
