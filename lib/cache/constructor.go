@@ -36,7 +36,7 @@ import (
 
 //------------------------------------------------------------------------------
 
-// TypeSpec is a constructor and a usage description for each input type.
+// TypeSpec is a constructor and a usage description for each cache type.
 type TypeSpec struct {
 	constructor func(conf Config, mgr types.Manager, log log.Modular, stats metrics.Type) (types.Cache, error)
 	description string

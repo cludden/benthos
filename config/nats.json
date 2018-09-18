@@ -8,6 +8,7 @@
 	"input": {
 		"type": "nats",
 		"nats": {
+			"prefetch_count": 32,
 			"queue": "benthos_queue",
 			"subject": "benthos_messages",
 			"urls": [
@@ -34,7 +35,8 @@
 	},
 	"resources": {
 		"caches": {},
-		"conditions": {}
+		"conditions": {},
+		"rate_limits": {}
 	},
 	"logger": {
 		"prefix": "benthos",

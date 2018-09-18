@@ -44,6 +44,7 @@ input:
     verb: GET
     headers:
       Content-Type: application/octet-stream
+    rate_limit: ""
     timeout_ms: 5000
     retry_period_ms: 1000
     max_retry_backoff_ms: 300000
@@ -165,6 +166,7 @@ input:
     - nats://localhost:4222
     subject: benthos_messages
     queue: benthos_queue
+    prefetch_count: 32
   nats_stream:
     urls:
     - nats://localhost:4222
@@ -299,7 +301,8 @@ pipeline:
       format: binary
       path: ${!count:files}-${!timestamp_unix_nano}.txt
     batch:
-      byte_size: 10000
+      byte_size: 0
+      count: 0
       condition:
         type: static
         and: []
@@ -476,6 +479,7 @@ pipeline:
         verb: POST
         headers:
           Content-Type: application/octet-stream
+        rate_limit: ""
         timeout_ms: 5000
         retry_period_ms: 1000
         max_retry_backoff_ms: 300000
@@ -525,6 +529,7 @@ pipeline:
       path: ""
       labels: {}
       value: ""
+    process_batch: []
     process_field:
       parts: []
       path: ""
@@ -608,6 +613,7 @@ output:
     verb: POST
     headers:
       Content-Type: application/octet-stream
+    rate_limit: ""
     timeout_ms: 5000
     retry_period_ms: 1000
     max_retry_backoff_ms: 300000
@@ -813,6 +819,12 @@ resources:
         part: 0
         arg: ""
       xor: []
+  rate_limit:
+    example:
+      type: local
+      local:
+        count: 1000
+        interval: 1s
 logger:
   prefix: benthos
   level: INFO

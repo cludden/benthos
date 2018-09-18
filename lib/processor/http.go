@@ -52,6 +52,10 @@ parallel requests with ` + "`max_parallel`" + `. Alternatively, you can use the
 ` + "[`archive`](#archive)" + ` processor to create a single message
 from the batch.
 
+The ` + "`rate_limit`" + ` field can be used to specify a rate limit
+[resource](../rate_limits/README.md) to cap the rate of requests across all
+parallel components service wide.
+
 The URL and header values of this type can be dynamically set using function
 interpolations described [here](../config_interpolation.md#functions).
 
@@ -126,6 +130,7 @@ func NewHTTP(
 		conf.HTTP.Client,
 		client.OptSetLogger(g.log),
 		client.OptSetStats(metrics.Namespaced(g.stats, "processor.http")),
+		client.OptSetManager(mgr),
 	); err != nil {
 		return nil, err
 	}

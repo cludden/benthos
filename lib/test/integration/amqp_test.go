@@ -218,7 +218,7 @@ func testAMQPMultiplePart(url string, t *testing.T) {
 	for i := 0; i < N; i++ {
 		str1 := fmt.Sprintf("hello world: %v part 1", i)
 		str2 := fmt.Sprintf("hello world: %v part 2", i)
-		str3 := fmt.Sprintf("hello world: %v part 2", i)
+		str3 := fmt.Sprintf("hello world: %v part 3", i)
 		testMsgs[str1] = struct{}{}
 		testMsgs[str2] = struct{}{}
 		testMsgs[str3] = struct{}{}

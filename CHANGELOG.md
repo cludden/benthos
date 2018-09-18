@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- New `process_batch` processor.
+- Added `count` field to `batch` processor.
+
+### Changed
+
+- The `combine` processor is now considered DEPRECATED, please use the `batch`
+  processor instead.
+- The `batch` processor field `byte_size` is now set at 0 (and therefore
+  ignored) by default. A log warning has been added in case anyone was relying
+  on the default.
+
+### 0.31.4 - 2018-09-16
+
+### Added
+
+- New `rate_limit` resource with a `local` type.
+- Field `rate_limit` added to `http` based processors, inputs and outputs.
+
+### 0.31.2 - 2018-09-14
+
+### Added
+
+- New `prefetch_count` field added to `nats` input.
+
 ### 0.31.0 - 2018-09-11
 
 ### Added

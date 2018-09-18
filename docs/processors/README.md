@@ -18,8 +18,8 @@ You can [find some examples here][0].
 ### Batching and Multiple Part Messages
 
 All Benthos processors support multiple part messages, which are synonymous with
-batches. Some processors such as [combine](#combine), [batch](#batch) and
-[split](#split) are able to create, expand and break down batches.
+batches. Some processors such as [batch](#batch) and [split](#split) are able to
+create, expand and break down batches.
 
 Many processors are able to perform their behaviours on specific parts of a
 message batch, or on all parts, and have a field `parts` for
@@ -30,6 +30,10 @@ Part indexes can be negative, and if so the part will be selected from the end
 counting backwards starting from -1. E.g. if part = -1 then the selected part
 will be the last part of the message, if part = -2 then the part before the last
 element will be selected, and so on.
+
+Sometimes a processor acts across an entire batch, when instead we'd like to
+perform them on individual messages of a batch. In this case the
+[`process_batch`](#process_batch) processor can be used.
 
 ### Contents
 
@@ -56,14 +60,15 @@ element will be selected, and so on.
 21. [`metadata`](#metadata)
 22. [`metric`](#metric)
 23. [`noop`](#noop)
-24. [`process_field`](#process_field)
-25. [`process_map`](#process_map)
-26. [`sample`](#sample)
-27. [`select_parts`](#select_parts)
-28. [`split`](#split)
-29. [`text`](#text)
-30. [`throttle`](#throttle)
-31. [`unarchive`](#unarchive)
+24. [`process_batch`](#process_batch)
+25. [`process_field`](#process_field)
+26. [`process_map`](#process_map)
+27. [`sample`](#sample)
+28. [`select_parts`](#select_parts)
+29. [`split`](#split)
+30. [`text`](#text)
+31. [`throttle`](#throttle)
+32. [`unarchive`](#unarchive)
 
 ## `archive`
 
@@ -91,17 +96,21 @@ of the batch.
 ``` yaml
 type: batch
 batch:
-  byte_size: 10000
+  byte_size: 0
   condition:
     type: static
     static: false
+  count: 0
   period_ms: 0
 ```
 
 Reads a number of discrete messages, buffering (but not acknowledging) the
 message parts until either:
 
-- The total size of the batch in bytes matches or exceeds `byte_size`.
+- The `byte_size` field is non-zero and the total size of the batch in
+  bytes matches or exceeds it.
+- The `count field is non-zero and the total number of messages in the
+  batch matches or exceeds it.
 - A message added to the batch causes the condition to resolve `true`.
 - The `period_ms` field is non-zero and the time since the last batch
   exceeds its value.
@@ -111,11 +120,11 @@ messages and sent through the pipeline. After reaching a destination the
 acknowledgment is sent out for all messages inside the batch at the same time,
 preserving at-least-once delivery guarantees.
 
-The `period_ms` field is optional, and when greater than zero defines
-a period in milliseconds whereby a batch is sent even if the `byte_size`
-has not yet been reached. Batch parameters are only triggered when a message is
-added, meaning a pending batch can last beyond this period if no messages are
-added since the period was reached.
+The `period_ms` field - when greater than zero - defines a period in
+milliseconds whereby a batch is sent even if the `byte_size` has not
+yet been reached. Batch parameters are only triggered when a message is added,
+meaning a pending batch can last beyond this period if no messages are added
+since the period was reached.
 
 When a batch is sent to an output the behaviour will differ depending on the
 protocol. If the output type supports multipart messages then the batch is sent
@@ -151,24 +160,8 @@ combine:
   parts: 2
 ```
 
-Reads a number of discrete messages, buffering (but not acknowledging) the
-message parts until the size of the batch reaches or exceeds the target size.
-
-Once the size is reached or exceeded the parts are combined into a single batch
-of messages and sent through the pipeline. After reaching a destination the
-acknowledgment is sent out for all messages inside the batch at the same time,
-preserving at-least-once delivery guarantees.
-
-When a batch is sent to an output the behaviour will differ depending on the
-protocol. If the output type supports multipart messages then the batch is sent
-as a single message with multiple parts. If the output only supports single part
-messages then the parts will be sent as a batch of single part messages. If the
-output supports neither multipart or batches of messages then Benthos falls back
-to sending them individually.
-
-If a Benthos stream contains multiple brokered inputs or outputs then the batch
-operator should *always* be applied directly after an input in order to avoid
-unexpected behaviour and message ordering.
+DEPRECATED: Use the [`batch`](#batch) processor with the
+`count` field instead.
 
 ## `compress`
 
@@ -316,7 +309,7 @@ Tests each message against a condition, if the condition fails then the message
 is dropped. You can find a [full list of conditions here](../conditions).
 
 NOTE: If you are combining messages into batches using the
-[`combine`](#combine) or [`batch`](#batch) processors this filter will
+[`batch`](#batch) processor this filter will
 apply to the _whole_ batch. If you instead wish to filter _individual_ parts of
 the batch use the [`filter_parts`](#filter_parts) processor.
 
@@ -339,8 +332,7 @@ in this case each condition will be applied to a part as if it were a single
 part message.
 
 This processor is useful if you are combining messages into batches using the
-[`combine`](#combine) or [`batch`](#batch) processors and wish to
-remove specific parts.
+[`batch`](#batch) processor and wish to remove specific parts.
 
 ## `grok`
 
@@ -433,6 +425,7 @@ http:
       consumer_secret: ""
       enabled: false
       request_url: ""
+    rate_limit: ""
     retries: 3
     retry_period_ms: 1000
     timeout_ms: 5000
@@ -459,6 +452,10 @@ be sent as individual requests in parallel. You can also cap the max number of
 parallel requests with `max_parallel`. Alternatively, you can use the
 [`archive`](#archive) processor to create a single message
 from the batch.
+
+The `rate_limit` field can be used to specify a rate limit
+[resource](../rate_limits/README.md) to cap the rate of requests across all
+parallel components service wide.
 
 The URL and header values of this type can be dynamically set using function
 interpolations described [here](../config_interpolation.md#functions).
@@ -759,6 +756,21 @@ type: noop
 
 Noop is a no-op processor that does nothing, the message passes through
 unchanged.
+
+## `process_batch`
+
+``` yaml
+type: process_batch
+process_batch: []
+```
+
+A processor that applies a list of child processors to messages of a batch as
+though they were each a batch of one message. This is useful for forcing batch
+wide processors such as [`dedupe`](#dedupe) to apply to individual
+message parts of a batch instead.
+
+Please note that most processors already process per message of a batch, and
+this processor is not needed in those cases.
 
 ## `process_field`
 

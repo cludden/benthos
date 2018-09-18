@@ -41,12 +41,12 @@ import (
 
 // StreamStatus tracks a stream along with information regarding its internals.
 type StreamStatus struct {
+	stoppedAfter int64
 	config       stream.Config
 	strm         *stream.Type
 	logger       log.Modular
 	metrics      *metrics.Local
 	createdAt    time.Time
-	stoppedAfter int64
 }
 
 // NewStreamStatus creates a new StreamStatus.
@@ -126,6 +126,11 @@ func (n *nsMgr) GetCache(name string) (types.Cache, error) {
 // GetCondition attempts to find a service wide condition by its name.
 func (n *nsMgr) GetCondition(name string) (types.Condition, error) {
 	return n.mgr.GetCondition(name)
+}
+
+// GetRateLimit attempts to find a service wide rate limit by its name.
+func (n *nsMgr) GetRateLimit(name string) (types.RateLimit, error) {
+	return n.mgr.GetRateLimit(name)
 }
 
 // GetPipe returns a named pipe transaction channel.
