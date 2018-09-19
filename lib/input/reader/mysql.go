@@ -126,12 +126,12 @@ type MySQL struct {
 	bufferTimeout    time.Duration
 	canal            *canal.Canal
 	closed           chan error
+	running          bool
 	internalMessages chan *mysqlEntry
 	interruptChan    chan struct{}
 	key              string
 	lastPosition     mysql.Position
 	syncInterval     time.Duration
-	unacked          []*message.Part
 	unackedPos       *mysql.Position
 
 	conf  MySQLConfig
@@ -194,6 +194,7 @@ func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metric
 	c.Addr = fmt.Sprintf("%s:%d", conf.Host, conf.Port)
 	c.User = conf.Username
 	c.Password = conf.Password
+	c.ServerID = conf.ConsumerID
 	c.Dump.DiscardErr = false
 	c.Dump.ExecutionPath = conf.MySQLDumpPath
 	c.Dump.SkipMasterData = false
@@ -282,6 +283,13 @@ func (m *MySQL) marshalRowSummary(table *schema.Table, row []interface{}) *gabs.
 
 // OnPosSynced handles a MySQL binlog position event
 func (m *MySQL) OnPosSynced(pos mysql.Position, force bool) error {
+	// ignore final position sync event, handled by reader close
+	m.RLock()
+	defer m.RUnlock()
+	if !m.running {
+		return nil
+	}
+
 	select {
 	case m.internalMessages <- &mysqlEntry{pos: &pos}:
 		m.lastPosition = pos
@@ -430,7 +438,6 @@ func (m *MySQL) periodicSync(consumerID uint32, syncInterval time.Duration) {
 		ConsumerID: consumerID,
 	}
 	defer func() {
-		position.LastSyncedAt = time.Now()
 		m.closed <- m.sync(position)
 	}()
 
@@ -525,21 +532,15 @@ func (m *MySQL) Acknowledge(err error) error {
 		return nil
 	}
 
-	l := len(m.unacked)
-	if l == 0 {
-		return nil
-	}
-
 	// retrieve last unacked position
 	pos := m.unackedPos
 	if pos == nil {
-		m.unacked = nil
 		return nil
 	}
 
 	// send position and clear unacked
 	m.ack <- *pos
-	m.unacked = nil
+	m.unackedPos = nil
 
 	return nil
 }
@@ -557,6 +558,10 @@ func (m *MySQL) CloseAsync() {
 func (m *MySQL) Connect() error {
 	m.Lock()
 	defer m.Unlock()
+
+	if m.running {
+		return types.ErrAlreadyStarted
+	}
 
 	// load starting position
 	pos, err := m.loadPosition()
@@ -582,8 +587,13 @@ func (m *MySQL) Connect() error {
 			})
 		}
 	}
+
+	m.running = true
 	go func() {
 		m.closed <- start(m.canal)
+		m.Lock()
+		m.running = false
+		m.Unlock()
 		close(m.ack)
 		close(m.internalMessages)
 	}()
@@ -597,29 +607,17 @@ func (m *MySQL) Read() (types.Message, error) {
 	var msg types.Message
 	var n int
 
-	// requeue any unacknowledged message parts
-	if l := len(m.unacked); l > 0 {
-		msg = message.New(nil)
-		for i := 0; i < l && n < m.batchSize; i++ {
-			msg.Append(m.unacked[i])
-			n++
-		}
-	}
-
-	// if message empty, block until at least one part has been read
 	for n == 0 {
 		select {
 		case entry, ok := <-m.internalMessages:
 			if !ok {
 				return nil, types.ErrTypeClosed
-			}
-			if entry.part == nil {
+			} else if entry.part == nil {
+				// if entry contains position marker, update unacked pos
 				m.unackedPos = entry.pos
 			} else {
-				m.unacked = append(m.unacked, entry.part)
-				if msg == nil {
-					msg = message.New(nil)
-				}
+				// otherwise, add record to message
+				msg = message.New(nil)
 				msg.Append(entry.part)
 				n++
 			}
@@ -642,11 +640,9 @@ batch:
 		case entry, ok := <-m.internalMessages:
 			if !ok {
 				return nil, types.ErrTypeClosed
-			}
-			if entry.part == nil {
+			} else if entry.part == nil {
 				m.unackedPos = entry.pos
 			} else {
-				m.unacked = append(m.unacked, entry.part)
 				if msg == nil {
 					msg = message.New(nil)
 				}

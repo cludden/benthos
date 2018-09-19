@@ -128,6 +128,7 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 
 	c, err := cache.NewMemory(cache.NewConfig(), mgr, log, metrics.DudType{})
 
+	config.ConsumerID = 1
 	config.SyncInterval = "1ms"
 	r, err := NewMySQL(config, c, log, metrics.DudType{})
 	if err != nil {
@@ -326,6 +327,7 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 
 func testMySQLBatch(t *testing.T, db *sql.DB, config MySQLConfig) {
 	config.BatchSize = 3
+	config.ConsumerID = 2
 	met := metrics.DudType{}
 	log := log.New(os.Stdout, log.Config{LogLevel: "DEBUG"})
 	mgr, err := manager.New(manager.NewConfig(), nil, log, met)
@@ -398,6 +400,7 @@ func testMySQLBatch(t *testing.T, db *sql.DB, config MySQLConfig) {
 }
 
 func testMySQLDisconnect(t *testing.T, config MySQLConfig) {
+	config.ConsumerID = 3
 	met := metrics.DudType{}
 	log := log.New(os.Stdout, log.Config{LogLevel: "DEBUG"})
 	mgr, err := manager.New(manager.NewConfig(), nil, log, met)
@@ -420,11 +423,11 @@ func testMySQLDisconnect(t *testing.T, config MySQLConfig) {
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		r.CloseAsync()
 		if err := r.WaitForClose(time.Second); err != nil {
 			t.Error(err)
 		}
-		wg.Done()
 	}()
 
 	if _, err = r.Read(); err != types.ErrTypeClosed && err != types.ErrNotConnected {
