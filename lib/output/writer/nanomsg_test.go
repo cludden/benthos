@@ -18,11 +18,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-package output
+package writer
 
 import (
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -33,7 +32,6 @@ import (
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
-	"github.com/Jeffail/benthos/lib/types"
 )
 
 //------------------------------------------------------------------------------
@@ -41,19 +39,19 @@ import (
 func TestNanomsgBasic(t *testing.T) {
 	nTestLoops := 1000
 
-	sendChan := make(chan types.Transaction)
-	resChan := make(chan types.Response)
+	conf := NewNanomsgConfig()
+	conf.URLs = []string{"tcp://localhost:1324"}
+	conf.Bind = true
+	conf.PollTimeoutMS = 100
+	conf.SocketType = "PUSH"
 
-	conf := NewConfig()
-	conf.Nanomsg.URLs = []string{"tcp://localhost:1324"}
-	conf.Nanomsg.Bind = true
-	conf.Nanomsg.PollTimeoutMS = 100
-	conf.Nanomsg.SocketType = "PUSH"
-
-	s, err := NewNanomsg(conf, nil, log.New(os.Stdout, logConfig), metrics.DudType{})
+	s, err := NewNanomsg(conf, log.Noop(), metrics.Noop())
 	if err != nil {
-		t.Error(err)
-		return
+		t.Fatal(err)
+	}
+
+	if err = s.Connect(); err != nil {
+		t.Fatal(err)
 	}
 
 	defer func() {
@@ -63,15 +61,9 @@ func TestNanomsgBasic(t *testing.T) {
 		}
 	}()
 
-	if err = s.Consume(sendChan); err != nil {
-		t.Error(err)
-		return
-	}
-
 	socket, err := pull.NewSocket()
 	if err != nil {
-		t.Error(err)
-		return
+		t.Fatal(err)
 	}
 	defer socket.Close()
 
@@ -79,39 +71,25 @@ func TestNanomsgBasic(t *testing.T) {
 	socket.SetOption(mangos.OptionRecvDeadline, time.Second)
 
 	if err = socket.Dial("tcp://localhost:1324"); err != nil {
-		t.Error(err)
-		return
+		t.Fatal(err)
 	}
 
 	for i := 0; i < nTestLoops; i++ {
 		testStr := fmt.Sprintf("test%v", i)
 		testMsg := message.New([][]byte{[]byte(testStr)})
 
-		select {
-		case sendChan <- types.NewTransaction(testMsg, resChan):
-		case <-time.After(time.Second):
-			t.Errorf("Action timed out")
-			return
-		}
+		go func() {
+			if serr := s.Write(testMsg); serr != nil {
+				t.Error(serr)
+			}
+		}()
 
 		data, err := socket.Recv()
 		if err != nil {
-			t.Error(err)
-			return
+			t.Fatal(err)
 		}
 		if res := string(data); res != testStr {
 			t.Errorf("Wrong value on output: %v != %v", res, testStr)
-		}
-
-		select {
-		case res := <-resChan:
-			if res.Error() != nil {
-				t.Error(res.Error())
-				return
-			}
-		case <-time.After(time.Second):
-			t.Errorf("Action timed out")
-			return
 		}
 	}
 }
