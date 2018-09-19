@@ -229,9 +229,9 @@ func (m *MySQL) loadPosition() (*mysqlPosition, error) {
 	// attempt to load position from cache
 	state, err := m.cache.Get(m.key)
 	if err != nil {
-		m.log.Warnf("error retrieving last synchronized mysql position: %v", err)
+		m.log.Warnf("error retrieving last synchronized mysql position: %v\n", err)
 	} else if err = json.Unmarshal(state, &pos); err != nil {
-		m.log.Warnf("error unmarshalling last synchronized mysql position: %v", err)
+		m.log.Warnf("error unmarshalling last synchronized mysql position: %v\n", err)
 	}
 
 	if err != nil {
@@ -294,7 +294,7 @@ func (m *MySQL) OnPosSynced(pos mysql.Position, force bool) error {
 func (m *MySQL) OnRow(e *canal.RowsEvent) error {
 	part, err := m.toPart(e, m.lastPosition.Name)
 	if err != nil {
-		m.log.Errorf("error parsing mysql row event: %v", err)
+		m.log.Errorf("error parsing mysql row event: %v\n", err)
 		close(m.internalMessages)
 		return err
 	}
@@ -366,7 +366,7 @@ func (m *MySQL) parseValue(col *schema.TableColumn, value interface{}) interface
 			eNum := value - 1
 			if eNum < 0 || eNum >= int64(len(col.EnumValues)) {
 				// we insert invalid enum value before, so return empty
-				m.log.Warnf("invalid binlog enum index %d, for enum %v", eNum, col.EnumValues)
+				m.log.Warnf("invalid binlog enum index %d, for enum %v\n", eNum, col.EnumValues)
 				return ""
 			}
 			return col.EnumValues[eNum]
@@ -467,7 +467,7 @@ func (m *MySQL) sync(position mysqlPosition) error {
 	position.LastSyncedAt = time.Now()
 	p, err := json.Marshal(&position)
 	if err != nil {
-		m.log.Errorf("error marshalling consumer position: %v", err)
+		m.log.Errorf("error marshalling consumer position: %v\n", err)
 		return err
 	}
 
@@ -475,11 +475,11 @@ func (m *MySQL) sync(position mysqlPosition) error {
 	if err := backoff.Retry(func() error {
 		return m.cache.Set(m.key, p)
 	}, m.backoff); err != nil {
-		m.log.Errorf("error persisting consumer position: %v", err)
+		m.log.Errorf("error persisting consumer position: %v\n", err)
 		return err
 	}
 
-	m.log.Infof("synced consumer %d position: %s:%d", position.ConsumerID, position.Log, position.Position)
+	m.log.Infof("synced consumer %d position: %s:%d\n", position.ConsumerID, position.Log, position.Position)
 	return nil
 }
 
