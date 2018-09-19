@@ -101,16 +101,13 @@ func TestMySQLIntegration(t *testing.T) {
 	config.Databases = []string{"test"}
 	config.Latest = true
 	config.Password = "s3cr3t"
+	config.PrefetchCount = 2000
 	config.Port = uint32(port)
 	config.SyncInterval = "5m"
 	config.Username = "root"
 
 	t.Run("testMySQLConnect", func(t *testing.T) {
 		testMySQLConnect(t, db, config)
-	})
-
-	t.Run("testMySQLBatch", func(t *testing.T) {
-		testMySQLBatch(t, db, config)
 	})
 
 	t.Run("testMySQLDisconnect", func(t *testing.T) {
@@ -322,80 +319,6 @@ func testMySQLConnect(t *testing.T, db *sql.DB, config MySQLConfig) {
 	}
 	if time.Now().Sub(pos.LastSyncedAt) > time.Second {
 		t.Error("expected cache position to have been synced within the last econd")
-	}
-}
-
-func testMySQLBatch(t *testing.T, db *sql.DB, config MySQLConfig) {
-	config.BatchSize = 3
-	config.ConsumerID = 2
-	met := metrics.DudType{}
-	log := log.New(os.Stdout, log.Config{LogLevel: "DEBUG"})
-	mgr, err := manager.New(manager.NewConfig(), nil, log, met)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	c, err := cache.NewMemory(cache.NewConfig(), mgr, log, metrics.DudType{})
-
-	r, err := NewMySQL(config, c, log, metrics.DudType{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := r.Connect(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		r.CloseAsync()
-		if err := r.WaitForClose(time.Second); err != nil {
-			t.Error(err)
-		}
-	}()
-
-	// insert mysql fixtures
-
-	rows := []testMySQLRow{
-		testMySQLRow{time.Now().Truncate(time.Microsecond), "quuz", 1},
-		testMySQLRow{time.Now().Truncate(time.Microsecond), "corge", 0},
-		testMySQLRow{time.Now().Truncate(time.Microsecond), "grault", 1},
-	}
-	stmt := "INSERT INTO `test`.`foo` (created_at, title, enabled) VALUES (?, ?, ?)"
-	for _, row := range rows {
-		_, err = db.Exec(stmt, row.createdAt, row.title, row.enabled)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// verify batch
-	msg, err := r.Read()
-	if err != nil {
-		t.Error(err)
-	} else {
-		if length := msg.Len(); length != 3 {
-			t.Fatalf("expected message to have length of %d, got %d", 3, length)
-		}
-		for i, row := range rows {
-			part, err := msg.Get(i).JSON()
-			if err != nil {
-				t.Error(err)
-			} else {
-				record, _ := part.(*MysqlMessage)
-				if action := record.Type; action != canal.InsertAction {
-					t.Errorf("expected part %d to have type %s, got %s", i, canal.InsertAction, action)
-				}
-				if string(record.Row.Before) != "null" {
-					t.Errorf("expected part %d to have null before image, got %v", i, record.Row.Before)
-				}
-				after, err := gabs.ParseJSON(record.Row.After)
-				if err != nil {
-					t.Error(err)
-				}
-				if title, ok := after.S("title").Data().(string); !ok || title != row.title {
-					t.Errorf("expected part %d to have title %s, got %s", i, row.title, title)
-				}
-			}
-		}
 	}
 }
 
