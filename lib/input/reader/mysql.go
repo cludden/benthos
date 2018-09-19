@@ -118,6 +118,7 @@ type MySQL struct {
 	closed           chan error
 	running          bool
 	internalMessages chan *mysqlEntry
+	next             *mysqlEntry
 	interruptChan    chan struct{}
 	key              string
 	lastPosition     mysql.Position
@@ -190,6 +191,20 @@ func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metric
 }
 
 //------------------------------------------------------------------------------
+
+func (m *MySQL) advance() (*mysqlEntry, error) {
+	next := m.next
+	select {
+	case entry, ok := <-m.internalMessages:
+		if !ok {
+			return nil, types.ErrTypeClosed
+		}
+		m.next = entry
+	case <-m.interruptChan:
+		return nil, types.ErrTypeClosed
+	}
+	return next, nil
+}
 
 // loadPosition computes the consumer's starting position
 func (m *MySQL) loadPosition() (*mysqlPosition, error) {
@@ -433,6 +448,31 @@ func (m *MySQL) periodicSync(consumerID uint32, syncInterval time.Duration) {
 			position.LastSyncedAt = unsynced
 		}
 	}
+}
+
+// reads the next binlog entry, updating unacked pos as the reader advances
+// through the stream
+func (m *MySQL) read() (*message.Part, error) {
+	var p *message.Part
+	for p == nil {
+		next, err := m.advance()
+		if err != nil {
+			return p, err
+		}
+		if next == nil {
+			continue
+		}
+		if next.pos != nil {
+			m.unackedPos = next.pos
+			continue
+		}
+		p = next.part
+	}
+	if m.next.pos != nil {
+		m.unackedPos = m.next.pos
+		m.next = nil
+	}
+	return p, nil
 }
 
 // sync the consumer position with the cache
