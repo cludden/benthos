@@ -130,8 +130,6 @@ input:
         urls:
         - ${INPUT_MQTT_URLS:tcp://localhost:1883}
       mysql:
-        batch_size: ${INPUT_MYSQL_BATCH_SIZE:0}
-        buffer_timeout: ${INPUT_MYSQL_BUFFER_TIMEOUT}
         cache: ${INPUT_MYSQL_CACHE}
         consumer_id: ${INPUT_MYSQL_CONSUMER_ID:0}
         databases: ${INPUT_MYSQL_DATABASES}

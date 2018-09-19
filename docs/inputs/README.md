@@ -570,8 +570,6 @@ You can access these metadata fields using
 ``` yaml
 type: mysql
 mysql:
-  batch_size: 0
-  buffer_timeout: ""
   cache: ""
   consumer_id: 0
   databases: null

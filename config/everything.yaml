@@ -137,8 +137,6 @@ input:
     - benthos_topic
     client_id: benthos_input
   mysql:
-    batch_size: 0
-    buffer_timeout: ""
     cache: ""
     consumer_id: 0
     databases: []

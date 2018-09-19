@@ -146,8 +146,6 @@ INPUT_MQTT_CLIENT_ID                        = benthos_input
 INPUT_MQTT_QOS                              = 1
 INPUT_MQTT_TOPICS                           = benthos_topic
 INPUT_MQTT_URLS                             = tcp://localhost:1883
-INPUT_MYSQL_BATCH_SIZE                      = 0
-INPUT_MYSQL_BUFFER_TIMEOUT
 INPUT_MYSQL_CACHE
 INPUT_MYSQL_CONSUMER_ID                     = 0
 INPUT_MYSQL_DATABASES
