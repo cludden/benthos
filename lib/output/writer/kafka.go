@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
+	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
 	"github.com/Jeffail/benthos/lib/types"
 	"github.com/Jeffail/benthos/lib/util/text"
@@ -46,7 +47,7 @@ type KafkaConfig struct {
 	Topic                string      `json:"topic" yaml:"topic"`
 	Compression          string      `json:"compression" yaml:"compression"`
 	MaxMsgBytes          int         `json:"max_msg_bytes" yaml:"max_msg_bytes"`
-	TimeoutMS            int         `json:"timeout_ms" yaml:"timeout_ms"`
+	Timeout              string      `json:"timeout" yaml:"timeout"`
 	AckReplicas          bool        `json:"ack_replicas" yaml:"ack_replicas"`
 	TargetVersion        string      `json:"target_version" yaml:"target_version"`
 	TLS                  btls.Config `json:"tls" yaml:"tls"`
@@ -62,7 +63,7 @@ func NewKafkaConfig() KafkaConfig {
 		Topic:                "benthos_stream",
 		Compression:          "none",
 		MaxMsgBytes:          1000000,
-		TimeoutMS:            5000,
+		Timeout:              "5s",
 		AckReplicas:          false,
 		TargetVersion:        sarama.V1_0_0_0.String(),
 		TLS:                  btls.NewConfig(),
@@ -77,6 +78,7 @@ type Kafka struct {
 	stats metrics.Type
 
 	tlsConf *tls.Config
+	timeout time.Duration
 
 	addresses []string
 	version   sarama.KafkaVersion
@@ -84,7 +86,8 @@ type Kafka struct {
 
 	mDroppedMaxBytes metrics.StatCounter
 
-	key *text.InterpolatedBytes
+	key   *text.InterpolatedBytes
+	topic *text.InterpolatedString
 
 	producer    sarama.SyncProducer
 	compression sarama.CompressionCodec
@@ -100,13 +103,20 @@ func NewKafka(conf KafkaConfig, log log.Modular, stats metrics.Type) (*Kafka, er
 	}
 
 	k := Kafka{
-		log:              log.NewModule(".output.kafka"),
-		stats:            stats,
-		mDroppedMaxBytes: stats.GetCounter("output.kafka.send.dropped.max_msg_bytes"),
+		log:   log,
+		stats: stats,
 
 		conf:        conf,
 		key:         text.NewInterpolatedBytes([]byte(conf.Key)),
+		topic:       text.NewInterpolatedString(conf.Topic),
 		compression: compression,
+	}
+
+	if tout := conf.Timeout; len(tout) > 0 {
+		var err error
+		if k.timeout, err = time.ParseDuration(tout); err != nil {
+			return nil, fmt.Errorf("failed to parse timeout string: %v", err)
+		}
 	}
 
 	if conf.TLS.Enabled {
@@ -149,6 +159,22 @@ func strToCompressionCodec(str string) (sarama.CompressionCodec, error) {
 
 //------------------------------------------------------------------------------
 
+func buildHeaders(part types.Part) []sarama.RecordHeader {
+	out := []sarama.RecordHeader{}
+	meta := part.Metadata()
+	meta.Iter(func(k, v string) error {
+		out = append(out, sarama.RecordHeader{
+			Key:   []byte(k),
+			Value: []byte(v),
+		})
+		return nil
+	})
+
+	return out
+}
+
+//------------------------------------------------------------------------------
+
 // Connect attempts to establish a connection to a Kafka broker.
 func (k *Kafka) Connect() error {
 	k.connMut.Lock()
@@ -165,7 +191,7 @@ func (k *Kafka) Connect() error {
 
 	config.Producer.Compression = k.compression
 	config.Producer.MaxMessageBytes = k.conf.MaxMsgBytes
-	config.Producer.Timeout = time.Duration(k.conf.TimeoutMS) * time.Millisecond
+	config.Producer.Timeout = k.timeout
 	config.Producer.Return.Errors = true
 	config.Producer.Return.Successes = true
 	config.Net.TLS.Enable = k.conf.TLS.Enabled
@@ -205,15 +231,13 @@ func (k *Kafka) Write(msg types.Message) error {
 
 	msgs := []*sarama.ProducerMessage{}
 	msg.Iter(func(i int, p types.Part) error {
-		if len(p.Get()) > k.conf.MaxMsgBytes {
-			k.mDroppedMaxBytes.Incr(1)
-			return nil
-		}
+		lMsg := message.Lock(msg, i)
 
-		key := k.key.Get(msg)
+		key := k.key.Get(lMsg)
 		nextMsg := &sarama.ProducerMessage{
-			Topic: k.conf.Topic,
-			Value: sarama.ByteEncoder(p.Get()),
+			Topic:   k.topic.Get(lMsg),
+			Value:   sarama.ByteEncoder(p.Get()),
+			Headers: buildHeaders(p),
 		}
 		if len(key) > 0 {
 			nextMsg.Key = sarama.ByteEncoder(key)

@@ -21,6 +21,8 @@
 package processor
 
 import (
+	"time"
+
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -34,20 +36,20 @@ func init() {
 	Constructors[TypeSelectParts] = TypeSpec{
 		constructor: NewSelectParts,
 		description: `
-Cherry pick a set of parts from messages by their index. Indexes larger than the
-number of parts are simply ignored.
+Cherry pick a set of messages from a batch by their index. Indexes larger than
+the number of messages are simply ignored.
 
-The selected parts are added to the new message in the same order as the
+The selected parts are added to the new message batch in the same order as the
 selection array. E.g. with 'parts' set to [ 2, 0, 1 ] and the message parts
 [ '0', '1', '2', '3' ], the output will be [ '2', '0', '1' ].
 
-If none of the selected parts exist in the input message (resulting in an empty
-output message) the message is dropped entirely.
+If none of the selected parts exist in the input batch (resulting in an empty
+output message) the batch is dropped entirely.
 
-Part indexes can be negative, and if so the part will be selected from the end
-counting backwards starting from -1. E.g. if index = -1 then the selected part
-will be the last part of the message, if index = -2 then the part before the
-last element with be selected, and so on.`,
+Message indexes can be negative, and if so the part will be selected from the
+end counting backwards starting from -1. E.g. if index = -1 then the selected
+part will be the last part of the message, if index = -2 then the part before
+the last element with be selected, and so on.`,
 	}
 }
 
@@ -80,7 +82,7 @@ type SelectParts struct {
 	mSelected  metrics.StatCounter
 	mDropped   metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewSelectParts returns a SelectParts processor.
@@ -89,15 +91,15 @@ func NewSelectParts(
 ) (Type, error) {
 	return &SelectParts{
 		conf:  conf,
-		log:   log.NewModule(".processor.select_parts"),
+		log:   log,
 		stats: stats,
 
-		mCount:     stats.GetCounter("processor.select_parts.count"),
-		mSkipped:   stats.GetCounter("processor.select_parts.skipped"),
-		mSelected:  stats.GetCounter("processor.select_parts.selected"),
-		mDropped:   stats.GetCounter("processor.select_parts.dropped"),
-		mSent:      stats.GetCounter("processor.select_parts.sent"),
-		mSentParts: stats.GetCounter("processor.select_parts.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mSkipped:   stats.GetCounter("skipped"),
+		mSelected:  stats.GetCounter("selected"),
+		mDropped:   stats.GetCounter("dropped"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -131,10 +133,19 @@ func (m *SelectParts) ProcessMessage(msg types.Message) ([]types.Message, types.
 		return nil, response.NewAck()
 	}
 
-	m.mSent.Incr(1)
-	m.mSentParts.Incr(int64(newMsg.Len()))
+	m.mBatchSent.Incr(1)
+	m.mSent.Incr(int64(newMsg.Len()))
 	msgs := [1]types.Message{newMsg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (m *SelectParts) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (m *SelectParts) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

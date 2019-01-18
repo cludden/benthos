@@ -66,6 +66,8 @@ const (
 	TypeDynamic       = "dynamic"
 	TypeFile          = "file"
 	TypeFiles         = "files"
+	TypeGCPPubSub     = "gcp_pubsub"
+	TypeHDFS          = "hdfs"
 	TypeHTTPClient    = "http_client"
 	TypeHTTPServer    = "http_server"
 	TypeInproc        = "inproc"
@@ -99,6 +101,8 @@ type Config struct {
 	Dynamic       DynamicConfig              `json:"dynamic" yaml:"dynamic"`
 	File          FileConfig                 `json:"file" yaml:"file"`
 	Files         reader.FilesConfig         `json:"files" yaml:"files"`
+	GCPPubSub     reader.GCPPubSubConfig     `json:"gcp_pubsub" yaml:"gcp_pubsub"`
+	HDFS          reader.HDFSConfig          `json:"hdfs" yaml:"hdfs"`
 	HTTPClient    HTTPClientConfig           `json:"http_client" yaml:"http_client"`
 	HTTPServer    HTTPServerConfig           `json:"http_server" yaml:"http_server"`
 	Inproc        InprocConfig               `json:"inproc" yaml:"inproc"`
@@ -111,6 +115,7 @@ type Config struct {
 	NATS          reader.NATSConfig          `json:"nats" yaml:"nats"`
 	NATSStream    reader.NATSStreamConfig    `json:"nats_stream" yaml:"nats_stream"`
 	NSQ           reader.NSQConfig           `json:"nsq" yaml:"nsq"`
+	Plugin        interface{}                `json:"plugin,omitempty" yaml:"plugin,omitempty"`
 	ReadUntil     ReadUntilConfig            `json:"read_until" yaml:"read_until"`
 	RedisList     reader.RedisListConfig     `json:"redis_list" yaml:"redis_list"`
 	RedisPubSub   reader.RedisPubSubConfig   `json:"redis_pubsub" yaml:"redis_pubsub"`
@@ -132,6 +137,8 @@ func NewConfig() Config {
 		Dynamic:       NewDynamicConfig(),
 		File:          NewFileConfig(),
 		Files:         reader.NewFilesConfig(),
+		GCPPubSub:     reader.NewGCPPubSubConfig(),
+		HDFS:          reader.NewHDFSConfig(),
 		HTTPClient:    NewHTTPClientConfig(),
 		HTTPServer:    NewHTTPServerConfig(),
 		Inproc:        NewInprocConfig(),
@@ -144,6 +151,7 @@ func NewConfig() Config {
 		NATS:          reader.NewNATSConfig(),
 		NATSStream:    reader.NewNATSStreamConfig(),
 		NSQ:           reader.NewNSQConfig(),
+		Plugin:        nil,
 		ReadUntil:     NewReadUntilConfig(),
 		RedisList:     reader.NewRedisListConfig(),
 		RedisPubSub:   reader.NewRedisPubSubConfig(),
@@ -179,7 +187,16 @@ func SanitiseConfig(conf Config) (interface{}, error) {
 			return nil, err
 		}
 	} else {
-		outputMap[t] = hashMap[t]
+		if _, exists := hashMap[t]; exists {
+			outputMap[t] = hashMap[t]
+		}
+		if spec, exists := pluginSpecs[conf.Type]; exists {
+			if spec.confSanitiser != nil {
+				outputMap["plugin"] = spec.confSanitiser(conf.Plugin)
+			} else {
+				outputMap["plugin"] = hashMap["plugin"]
+			}
+		}
 	}
 
 	if len(conf.Processors) == 0 {
@@ -212,6 +229,20 @@ func (c *Config) UnmarshalJSON(bytes []byte) error {
 		return err
 	}
 
+	if spec, exists := pluginSpecs[aliased.Type]; exists {
+		dummy := struct {
+			Conf interface{} `json:"plugin"`
+		}{
+			Conf: spec.confConstructor(),
+		}
+		if err := json.Unmarshal(bytes, &dummy); err != nil {
+			return fmt.Errorf("failed to parse plugin config: %v", err)
+		}
+		aliased.Plugin = dummy.Conf
+	} else {
+		aliased.Plugin = nil
+	}
+
 	*c = Config(aliased)
 	return nil
 }
@@ -224,6 +255,21 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 	if err := unmarshal(&aliased); err != nil {
 		return err
+	}
+
+	if spec, exists := pluginSpecs[aliased.Type]; exists {
+		confBytes, err := yaml.Marshal(aliased.Plugin)
+		if err != nil {
+			return err
+		}
+
+		conf := spec.confConstructor()
+		if err = yaml.Unmarshal(confBytes, conf); err != nil {
+			return err
+		}
+		aliased.Plugin = conf
+	} else {
+		aliased.Plugin = nil
 	}
 
 	*c = Config(aliased)
@@ -323,14 +369,20 @@ func New(
 	pipelines ...types.PipelineConstructorFunc,
 ) (Type, error) {
 	if len(conf.Processors) > 0 {
-		pipelines = append([]types.PipelineConstructorFunc{func() (types.Pipeline, error) {
+		pipelines = append([]types.PipelineConstructorFunc{func(i *int) (types.Pipeline, error) {
+			if i == nil {
+				procs := 0
+				i = &procs
+			}
 			processors := make([]types.Processor, len(conf.Processors))
-			for i, procConf := range conf.Processors {
+			for j, procConf := range conf.Processors {
+				prefix := fmt.Sprintf("processor.%v", *i)
 				var err error
-				processors[i], err = processor.New(procConf, mgr, log.NewModule("."+conf.Type), stats)
+				processors[j], err = processor.New(procConf, mgr, log.NewModule("."+prefix), metrics.Namespaced(stats, prefix))
 				if err != nil {
 					return nil, fmt.Errorf("failed to create processor '%v': %v", procConf.Type, err)
 				}
+				*i++
 			}
 			return pipeline.NewProcessor(log, stats, processors...), nil
 		}}, pipelines...)
@@ -340,8 +392,15 @@ func New(
 			return c.brokerConstructor(conf, mgr, log, stats, pipelines...)
 		}
 		input, err := c.constructor(conf, mgr, log, stats)
-		for err != nil {
+		if err != nil {
 			return nil, fmt.Errorf("failed to create input '%v': %v", conf.Type, err)
+		}
+		return WrapWithPipelines(input, pipelines...)
+	}
+	if c, ok := pluginSpecs[conf.Type]; ok {
+		input, err := c.constructor(conf.Plugin, mgr, log, stats)
+		if err != nil {
+			return nil, err
 		}
 		return WrapWithPipelines(input, pipelines...)
 	}

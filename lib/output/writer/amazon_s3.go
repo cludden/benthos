@@ -22,50 +22,40 @@ package writer
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
+	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
 	"github.com/Jeffail/benthos/lib/types"
+	sess "github.com/Jeffail/benthos/lib/util/aws/session"
 	"github.com/Jeffail/benthos/lib/util/text"
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 )
 
 //------------------------------------------------------------------------------
 
-// AmazonAWSCredentialsConfig contains configuration params for AWS credentials.
-type AmazonAWSCredentialsConfig struct {
-	ID     string `json:"id" yaml:"id"`
-	Secret string `json:"secret" yaml:"secret"`
-	Token  string `json:"token" yaml:"token"`
-	Role   string `json:"role" yaml:"role"`
-}
-
 // AmazonS3Config contains configuration fields for the AmazonS3 output type.
 type AmazonS3Config struct {
-	Region      string                     `json:"region" yaml:"region"`
-	Bucket      string                     `json:"bucket" yaml:"bucket"`
-	Path        string                     `json:"path" yaml:"path"`
-	Credentials AmazonAWSCredentialsConfig `json:"credentials" yaml:"credentials"`
-	TimeoutS    int64                      `json:"timeout_s" yaml:"timeout_s"`
+	sess.Config `json:",inline" yaml:",inline"`
+	Bucket      string `json:"bucket" yaml:"bucket"`
+	Path        string `json:"path" yaml:"path"`
+	ContentType string `json:"content_type" yaml:"content_type"`
+	Timeout     string `json:"timeout" yaml:"timeout"`
 }
 
 // NewAmazonS3Config creates a new Config with default values.
 func NewAmazonS3Config() AmazonS3Config {
 	return AmazonS3Config{
-		Region: "eu-west-1",
-		Bucket: "",
-		Path:   "${!count:files}-${!timestamp_unix_nano}.txt",
-		Credentials: AmazonAWSCredentialsConfig{
-			ID:     "",
-			Secret: "",
-			Token:  "",
-		},
-		TimeoutS: 5,
+		Config:      sess.NewConfig(),
+		Bucket:      "",
+		Path:        "${!count:files}-${!timestamp_unix_nano}.txt",
+		ContentType: "application/octet-stream",
+		Timeout:     "5s",
 	}
 }
 
@@ -76,11 +66,11 @@ func NewAmazonS3Config() AmazonS3Config {
 type AmazonS3 struct {
 	conf AmazonS3Config
 
-	pathBytes       []byte
-	interpolatePath bool
+	path *text.InterpolatedString
 
 	session  *session.Session
 	uploader *s3manager.Uploader
+	timeout  time.Duration
 
 	log   log.Modular
 	stats metrics.Type
@@ -91,16 +81,21 @@ func NewAmazonS3(
 	conf AmazonS3Config,
 	log log.Modular,
 	stats metrics.Type,
-) *AmazonS3 {
-	pathBytes := []byte(conf.Path)
-	interpolatePath := text.ContainsFunctionVariables(pathBytes)
-	return &AmazonS3{
-		conf:            conf,
-		pathBytes:       pathBytes,
-		interpolatePath: interpolatePath,
-		log:             log.NewModule(".output.amazon_s3"),
-		stats:           stats,
+) (*AmazonS3, error) {
+	var timeout time.Duration
+	if tout := conf.Timeout; len(tout) > 0 {
+		var err error
+		if timeout, err = time.ParseDuration(tout); err != nil {
+			return nil, fmt.Errorf("failed to parse timeout period string: %v", err)
+		}
 	}
+	return &AmazonS3{
+		conf:    conf,
+		log:     log,
+		stats:   stats,
+		path:    text.NewInterpolatedString(conf.Path),
+		timeout: timeout,
+	}, nil
 }
 
 // Connect attempts to establish a connection to the target S3 bucket.
@@ -109,27 +104,9 @@ func (a *AmazonS3) Connect() error {
 		return nil
 	}
 
-	awsConf := aws.NewConfig()
-	if len(a.conf.Region) > 0 {
-		awsConf = awsConf.WithRegion(a.conf.Region)
-	}
-	if len(a.conf.Credentials.ID) > 0 {
-		awsConf = awsConf.WithCredentials(credentials.NewStaticCredentials(
-			a.conf.Credentials.ID,
-			a.conf.Credentials.Secret,
-			a.conf.Credentials.Token,
-		))
-	}
-
-	sess, err := session.NewSession(awsConf)
+	sess, err := a.conf.GetSession()
 	if err != nil {
 		return err
-	}
-
-	if len(a.conf.Credentials.Role) > 0 {
-		sess.Config = sess.Config.WithCredentials(
-			stscreds.NewCredentials(sess, a.conf.Credentials.Role),
-		)
 	}
 
 	a.session = sess
@@ -145,16 +122,24 @@ func (a *AmazonS3) Write(msg types.Message) error {
 		return types.ErrNotConnected
 	}
 
-	return msg.Iter(func(i int, p types.Part) error {
-		path := a.conf.Path
-		if a.interpolatePath {
-			path = string(text.ReplaceFunctionVariables(msg, a.pathBytes))
-		}
+	ctx, cancel := context.WithTimeout(
+		aws.BackgroundContext(), a.timeout,
+	)
+	defer cancel()
 
-		if _, err := a.uploader.Upload(&s3manager.UploadInput{
-			Body:   bytes.NewReader(p.Get()),
-			Bucket: aws.String(a.conf.Bucket),
-			Key:    aws.String(path),
+	return msg.Iter(func(i int, p types.Part) error {
+		metadata := map[string]*string{}
+		p.Metadata().Iter(func(k, v string) error {
+			metadata[k] = aws.String(v)
+			return nil
+		})
+
+		if _, err := a.uploader.UploadWithContext(ctx, &s3manager.UploadInput{
+			Bucket:      &a.conf.Bucket,
+			Key:         aws.String(a.path.Get(message.Lock(msg, i))),
+			Body:        bytes.NewReader(p.Get()),
+			ContentType: &a.conf.ContentType,
+			Metadata:    metadata,
 		}); err != nil {
 			return err
 		}

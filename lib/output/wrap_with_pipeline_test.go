@@ -47,6 +47,10 @@ func (m *mockOutput) Consume(ts <-chan types.Transaction) error {
 	return nil
 }
 
+func (m *mockOutput) Connected() bool {
+	return true
+}
+
 func (m *mockOutput) CloseAsync() {
 	// NOT EXPECTING TO HIT THIS
 }
@@ -95,14 +99,15 @@ func TestBasicWrapPipeline(t *testing.T) {
 		ts: make(chan types.Transaction),
 	}
 
-	newOutput, err := WrapWithPipeline(mockOut, func() (types.Pipeline, error) {
+	procs := 0
+	newOutput, err := WrapWithPipeline(&procs, mockOut, func(i *int) (types.Pipeline, error) {
 		return nil, errors.New("nope")
 	})
 	if err == nil {
 		t.Error("expected error from back constructor")
 	}
 
-	newOutput, err = WrapWithPipeline(mockOut, func() (types.Pipeline, error) {
+	newOutput, err = WrapWithPipeline(&procs, mockOut, func(i *int) (types.Pipeline, error) {
 		return mockPi, nil
 	})
 	if err != nil {
@@ -144,7 +149,7 @@ func TestBasicWrapPipelinesOrdering(t *testing.T) {
 
 	newOutput, err := WrapWithPipelines(
 		mockOut,
-		func() (types.Pipeline, error) {
+		func(i *int) (types.Pipeline, error) {
 			proc, err := processor.New(
 				firstProc, nil,
 				log.New(os.Stdout, log.Config{LogLevel: "NONE"}),
@@ -159,7 +164,7 @@ func TestBasicWrapPipelinesOrdering(t *testing.T) {
 				proc,
 			), nil
 		},
-		func() (types.Pipeline, error) {
+		func(i *int) (types.Pipeline, error) {
 			proc, err := processor.New(
 				secondProc, nil,
 				log.New(os.Stdout, log.Config{LogLevel: "NONE"}),
@@ -207,11 +212,13 @@ func TestBasicWrapPipelinesOrdering(t *testing.T) {
 		t.Errorf("Wrong contents: %s != %s", act, exp)
 	}
 
-	select {
-	case <-time.After(time.Second):
-		t.Fatal("timed out")
-	case tran.ResponseChan <- response.NewAck():
-	}
+	go func() {
+		select {
+		case <-time.After(time.Second):
+			t.Fatal("timed out")
+		case tran.ResponseChan <- response.NewAck():
+		}
+	}()
 
 	select {
 	case <-time.After(time.Second):

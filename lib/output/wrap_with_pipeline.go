@@ -38,8 +38,8 @@ type WithPipeline struct {
 
 // WrapWithPipeline routes a processing pipeline directly into an output and
 // returns a type that manages both and acts like an ordinary output.
-func WrapWithPipeline(out Type, pipeConstructor types.PipelineConstructorFunc) (*WithPipeline, error) {
-	pipe, err := pipeConstructor()
+func WrapWithPipeline(i *int, out Type, pipeConstructor types.PipelineConstructorFunc) (*WithPipeline, error) {
+	pipe, err := pipeConstructor(i)
 	if err != nil {
 		return nil, err
 	}
@@ -55,9 +55,10 @@ func WrapWithPipeline(out Type, pipeConstructor types.PipelineConstructorFunc) (
 
 // WrapWithPipelines wraps an output with a variadic number of pipelines.
 func WrapWithPipelines(out Type, pipeConstructors ...types.PipelineConstructorFunc) (Type, error) {
+	procs := 0
 	var err error
 	for i := len(pipeConstructors) - 1; i >= 0; i-- {
-		if out, err = WrapWithPipeline(out, pipeConstructors[i]); err != nil {
+		if out, err = WrapWithPipeline(&procs, out, pipeConstructors[i]); err != nil {
 			return nil, err
 		}
 	}
@@ -70,6 +71,12 @@ func WrapWithPipelines(out Type, pipeConstructors ...types.PipelineConstructorFu
 // producer.
 func (i *WithPipeline) Consume(tsChan <-chan types.Transaction) error {
 	return i.pipe.Consume(tsChan)
+}
+
+// Connected returns a boolean indicating whether this output is currently
+// connected to its target.
+func (i *WithPipeline) Connected() bool {
+	return i.out.Connected()
 }
 
 //------------------------------------------------------------------------------

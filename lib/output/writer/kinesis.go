@@ -30,10 +30,10 @@ import (
 	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
 	"github.com/Jeffail/benthos/lib/types"
+	sess "github.com/Jeffail/benthos/lib/util/aws/session"
+	"github.com/Jeffail/benthos/lib/util/retries"
 	"github.com/Jeffail/benthos/lib/util/text"
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
@@ -43,35 +43,41 @@ import (
 //------------------------------------------------------------------------------
 
 const (
-	mebibyte = 1048576
+	kinesisMaxRecordsCount = 500
+	mebibyte               = 1048576
 )
 
 var (
 	kinesisPayloadLimitExceeded = regexp.MustCompile("Member must have length less than or equal to")
 )
 
-// KinesisConfig contains configuration fields for the output Kinesis type.
+type sessionConfig struct {
+	sess.Config `json:",inline" yaml:",inline"`
+}
+
+// KinesisConfig contains configuration fields for the Kinesis output type.
 type KinesisConfig struct {
-	Endpoint     string                     `json:"endpoint" yaml:"endpoint"`
-	Region       string                     `json:"region" yaml:"region"`
-	Stream       string                     `json:"stream" yaml:"stream"`
-	HashKey      string                     `json:"hash_key" yaml:"hash_key"`
-	PartitionKey string                     `json:"partition_key" yaml:"partition_key"`
-	Credentials  AmazonAWSCredentialsConfig `json:"credentials" yaml:"credentials"`
+	sessionConfig  `json:",inline" yaml:",inline"`
+	Stream         string `json:"stream" yaml:"stream"`
+	HashKey        string `json:"hash_key" yaml:"hash_key"`
+	PartitionKey   string `json:"partition_key" yaml:"partition_key"`
+	retries.Config `json:",inline" yaml:",inline"`
 }
 
 // NewKinesisConfig creates a new Config with default values.
 func NewKinesisConfig() KinesisConfig {
+	rConf := retries.NewConfig()
+	rConf.Backoff.InitialInterval = "1s"
+	rConf.Backoff.MaxInterval = "5s"
+	rConf.Backoff.MaxElapsedTime = "30s"
 	return KinesisConfig{
-		Region:       "eu-west-1",
+		sessionConfig: sessionConfig{
+			Config: sess.NewConfig(),
+		},
 		Stream:       "",
 		HashKey:      "",
 		PartitionKey: "",
-		Credentials: AmazonAWSCredentialsConfig{
-			ID:     "",
-			Secret: "",
-			Token:  "",
-		},
+		Config:       rConf,
 	}
 }
 
@@ -93,6 +99,11 @@ type Kinesis struct {
 
 	log   log.Modular
 	stats metrics.Type
+
+	mThrottled       metrics.StatCounter
+	mThrottledF      metrics.StatCounter
+	mPartsThrottled  metrics.StatCounter
+	mPartsThrottledF metrics.StatCounter
 }
 
 // NewKinesis creates a new Amazon Kinesis writer.Type.
@@ -105,14 +116,22 @@ func NewKinesis(
 		return nil, errors.New("partition key must not be empty")
 	}
 
-	return &Kinesis{
-		conf:         conf,
-		log:          log.NewModule(".output.kinesis"),
-		stats:        stats,
-		hashKey:      text.NewInterpolatedString(conf.HashKey),
-		partitionKey: text.NewInterpolatedString(conf.PartitionKey),
-		streamName:   aws.String(conf.Stream),
-	}, nil
+	k := Kinesis{
+		conf:            conf,
+		log:             log,
+		stats:           stats,
+		mPartsThrottled: stats.GetCounter("parts.send.throttled"),
+		mThrottled:      stats.GetCounter("send.throttled"),
+		hashKey:         text.NewInterpolatedString(conf.HashKey),
+		partitionKey:    text.NewInterpolatedString(conf.PartitionKey),
+		streamName:      aws.String(conf.Stream),
+	}
+
+	var err error
+	if k.backoff, err = conf.Config.Get(); err != nil {
+		return nil, err
+	}
+	return &k, nil
 }
 
 //------------------------------------------------------------------------------
@@ -126,8 +145,7 @@ func (a *Kinesis) toRecords(msg types.Message) ([]*kinesis.PutRecordsRequestEntr
 	entries := make([]*kinesis.PutRecordsRequestEntry, msg.Len())
 
 	err := msg.Iter(func(i int, p types.Part) error {
-		m := message.New(nil)
-		m.Append(p)
+		m := message.Lock(msg, i)
 
 		entry := kinesis.PutRecordsRequestEntry{
 			Data:         p.Get(),
@@ -159,30 +177,9 @@ func (a *Kinesis) Connect() error {
 		return nil
 	}
 
-	awsConf := aws.NewConfig()
-	if len(a.conf.Region) > 0 {
-		awsConf = awsConf.WithRegion(a.conf.Region)
-	}
-	if len(a.conf.Endpoint) > 0 {
-		awsConf = awsConf.WithEndpoint(a.conf.Endpoint)
-	}
-	if len(a.conf.Credentials.ID) > 0 {
-		awsConf = awsConf.WithCredentials(credentials.NewStaticCredentials(
-			a.conf.Credentials.ID,
-			a.conf.Credentials.Secret,
-			a.conf.Credentials.Token,
-		))
-	}
-
-	sess, err := session.NewSession(awsConf)
+	sess, err := a.conf.GetSession()
 	if err != nil {
 		return err
-	}
-
-	if len(a.conf.Credentials.Role) > 0 {
-		sess.Config = sess.Config.WithCredentials(
-			stscreds.NewCredentials(sess, a.conf.Credentials.Role),
-		)
 	}
 
 	a.session = sess
@@ -216,6 +213,13 @@ func (a *Kinesis) Write(msg types.Message) error {
 		StreamName: a.streamName,
 	}
 
+	// trim input record length to max kinesis batch size
+	if len(records) > kinesisMaxRecordsCount {
+		input.Records, records = records[:kinesisMaxRecordsCount], records[kinesisMaxRecordsCount:]
+	} else {
+		records = nil
+	}
+
 	var failed []*kinesis.PutRecordsRequestEntry
 	a.backoff.Reset()
 	for len(input.Records) > 0 {
@@ -226,16 +230,13 @@ func (a *Kinesis) Write(msg types.Message) error {
 		if err != nil {
 			a.log.Warnf("kinesis error: %v\n", err)
 			// bail if a message is too large or all retry attempts expired
-			if msg := err.Error(); kinesisPayloadLimitExceeded.MatchString(msg) {
-				err = types.ErrMessageTooLarge
-				return err
-			} else if wait == backoff.Stop {
+			if wait == backoff.Stop {
 				return err
 			}
 			continue
 		}
 
-		// retry any individual records that failed
+		// requeue any individual records that failed due to throttling
 		failed = nil
 		if output.FailedRecordCount != nil {
 			for i, entry := range output.Records {
@@ -243,7 +244,8 @@ func (a *Kinesis) Write(msg types.Message) error {
 					failed = append(failed, input.Records[i])
 					if *entry.ErrorCode != kinesis.ErrCodeProvisionedThroughputExceededException && *entry.ErrorCode != kinesis.ErrCodeKMSThrottlingException {
 						err = fmt.Errorf("record failed with code [%s] %s: %+v", *entry.ErrorCode, *entry.ErrorMessage, input.Records[i])
-						a.log.Warnf("kinesis record error: %v\n", err)
+						a.log.Errorf("kinesis record error: %v\n", err)
+						return err
 					}
 				}
 			}
@@ -251,16 +253,27 @@ func (a *Kinesis) Write(msg types.Message) error {
 		input.Records = failed
 
 		// if throttling errors detected, pause briefly
-		if l := len(failed); l > 0 {
-			a.log.Warnf("scheduling retry of failed records (%d)\n", l)
-			wait := a.backoff.NextBackOff()
+		l := len(failed)
+		if l > 0 {
+			a.mThrottled.Incr(1)
+			a.mPartsThrottled.Incr(int64(l))
+			a.log.Warnf("scheduling retry of throttled records (%d)\n", l)
 			if wait == backoff.Stop {
 				return types.ErrTimeout
 			}
 			time.Sleep(wait)
 		}
+
+		// add remaining records to batch
+		if n := len(records); n > 0 && l < kinesisMaxRecordsCount {
+			if remaining := kinesisMaxRecordsCount - l; remaining < n {
+				input.Records, records = append(input.Records, records[:remaining]...), records[remaining:]
+			} else {
+				input.Records, records = append(input.Records, records...), nil
+			}
+		}
 	}
-	return nil
+	return err
 }
 
 // CloseAsync begins cleaning up resources used by this reader asynchronously.

@@ -21,6 +21,8 @@
 package processor
 
 import (
+	"time"
+
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -41,7 +43,10 @@ is 1 message.)
 For each batch, if there is a remainder of parts after splitting a batch, the
 remainder is also sent as a single batch. For example, if your target size was
 10, and the processor received a batch of 95 message parts, the result would be
-9 batches of 10 messages followed by a batch of 5 messages.`,
+9 batches of 10 messages followed by a batch of 5 messages.
+
+The split processor should *always* be positioned at the end of a list of
+processors.`,
 	}
 }
 
@@ -72,7 +77,7 @@ type Split struct {
 	mCount     metrics.StatCounter
 	mDropped   metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewSplit returns a Split processor.
@@ -80,15 +85,15 @@ func NewSplit(
 	conf Config, mgr types.Manager, log log.Modular, stats metrics.Type,
 ) (Type, error) {
 	return &Split{
-		log:   log.NewModule(".processor.split"),
+		log:   log,
 		stats: stats,
 
 		size: conf.Split.Size,
 
-		mCount:     stats.GetCounter("processor.split.count"),
-		mDropped:   stats.GetCounter("processor.split.dropped"),
-		mSent:      stats.GetCounter("processor.split.sent"),
-		mSentParts: stats.GetCounter("processor.split.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mDropped:   stats.GetCounter("dropped"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -120,9 +125,18 @@ func (s *Split) ProcessMessage(msg types.Message) ([]types.Message, types.Respon
 		msgs = append(msgs, newMsg)
 	}
 
-	s.mSent.Incr(int64(len(msgs)))
-	s.mSentParts.Incr(int64(msg.Len()))
+	s.mBatchSent.Incr(int64(len(msgs)))
+	s.mSent.Incr(int64(msg.Len()))
 	return msgs, nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (s *Split) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (s *Split) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

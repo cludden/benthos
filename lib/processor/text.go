@@ -23,7 +23,9 @@ package processor
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"regexp"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -40,14 +42,26 @@ func init() {
 		description: `
 Performs text based mutations on payloads.
 
-This processor will interpolate functions within the 'value' field, you can find
-a list of functions [here](../config_interpolation.md#functions).
+This processor will interpolate functions within the ` + "`value`" + ` field,
+you can find a list of functions [here](../config_interpolation.md#functions).
 
 ### Operations
 
 #### ` + "`append`" + `
 
 Appends text to the end of the payload.
+
+#### ` + "`escape_url_query`" + `
+
+Escapes text so that it is safe to place within the query section of a URL.
+
+#### ` + "`unescape_url_query`" + `
+
+Unescapes text that has been url escaped.
+
+#### ` + "`find_regexp`" + `
+
+Extract the matching section of the argument regular expression in a message.
 
 #### ` + "`prepend`" + `
 
@@ -60,19 +74,32 @@ Replaces all occurrences of the argument in a message with a value.
 #### ` + "`replace_regexp`" + `
 
 Replaces all occurrences of the argument regular expression in a message with a
-value.
+value. Inside the value $ signs are interpreted as submatch expansions, e.g. $1
+represents the text of the first submatch.
+
+#### ` + "`set`" + `
+
+Replace the contents of a message entirely with a value.
 
 #### ` + "`strip_html`" + `
 
 Removes all HTML tags from a message.
 
-#### ` + "`trim_space`" + `
+#### ` + "`to_lower`" + `
 
-Removes all leading and trailing whitespace from the payload.
+Converts all text into lower case.
+
+#### ` + "`to_upper`" + `
+
+Converts all text into upper case.
 
 #### ` + "`trim`" + `
 
-Removes all leading and trailing occurrences of characters within the arg field.`,
+Removes all leading and trailing occurrences of characters within the arg field.
+
+#### ` + "`trim_space`" + `
+
+Removes all leading and trailing whitespace from the payload.`,
 	}
 }
 
@@ -109,6 +136,22 @@ func newTextAppendOperator() textOperator {
 	}
 }
 
+func newTextEscapeURLQueryOperator() textOperator {
+	return func(body []byte, value []byte) ([]byte, error) {
+		return []byte(url.QueryEscape(string(body))), nil
+	}
+}
+
+func newTextUnescapeURLQueryOperator() textOperator {
+	return func(body []byte, value []byte) ([]byte, error) {
+		s, err := url.QueryUnescape(string(body))
+		if err != nil {
+			return nil, err
+		}
+		return []byte(s), nil
+	}
+}
+
 func newTextPrependOperator() textOperator {
 	return func(body []byte, value []byte) ([]byte, error) {
 		if len(value) == 0 {
@@ -124,9 +167,27 @@ func newTextTrimSpaceOperator() textOperator {
 	}
 }
 
+func newTextToUpperOperator() textOperator {
+	return func(body []byte, value []byte) ([]byte, error) {
+		return bytes.ToUpper(body), nil
+	}
+}
+
+func newTextToLowerOperator() textOperator {
+	return func(body []byte, value []byte) ([]byte, error) {
+		return bytes.ToLower(body), nil
+	}
+}
+
 func newTextTrimOperator(arg string) textOperator {
 	return func(body []byte, value []byte) ([]byte, error) {
 		return bytes.Trim(body, arg), nil
+	}
+}
+
+func newTextSetOperator() textOperator {
+	return func(body []byte, value []byte) ([]byte, error) {
+		return value, nil
 	}
 }
 
@@ -147,6 +208,16 @@ func newTextReplaceRegexpOperator(arg string) (textOperator, error) {
 	}, nil
 }
 
+func newTextFindRegexpOperator(arg string) (textOperator, error) {
+	rp, err := regexp.Compile(arg)
+	if err != nil {
+		return nil, err
+	}
+	return func(body []byte, value []byte) ([]byte, error) {
+		return rp.Find(body), nil
+	}, nil
+}
+
 func newTextStripHTMLOperator(arg string) textOperator {
 	p := bluemonday.NewPolicy()
 	return func(body []byte, value []byte) ([]byte, error) {
@@ -158,18 +229,30 @@ func getTextOperator(opStr string, arg string) (textOperator, error) {
 	switch opStr {
 	case "append":
 		return newTextAppendOperator(), nil
+	case "escape_url_query":
+		return newTextEscapeURLQueryOperator(), nil
+	case "unescape_url_query":
+		return newTextUnescapeURLQueryOperator(), nil
+	case "find_regexp":
+		return newTextFindRegexpOperator(arg)
 	case "prepend":
 		return newTextPrependOperator(), nil
-	case "trim_space":
-		return newTextTrimSpaceOperator(), nil
-	case "trim":
-		return newTextTrimOperator(arg), nil
 	case "replace":
 		return newTextReplaceOperator(arg), nil
 	case "replace_regexp":
 		return newTextReplaceRegexpOperator(arg)
+	case "set":
+		return newTextSetOperator(), nil
 	case "strip_html":
 		return newTextStripHTMLOperator(arg), nil
+	case "to_lower":
+		return newTextToLowerOperator(), nil
+	case "to_upper":
+		return newTextToUpperOperator(), nil
+	case "trim":
+		return newTextTrimOperator(arg), nil
+	case "trim_space":
+		return newTextTrimSpaceOperator(), nil
 	}
 	return nil, fmt.Errorf("operator not recognised: %v", opStr)
 }
@@ -188,10 +271,9 @@ type Text struct {
 	stats metrics.Type
 
 	mCount     metrics.StatCounter
-	mSucc      metrics.StatCounter
 	mErr       metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewText returns a Text processor.
@@ -201,16 +283,15 @@ func NewText(
 	t := &Text{
 		parts: conf.Text.Parts,
 		conf:  conf,
-		log:   log.NewModule(".processor.text"),
+		log:   log,
 		stats: stats,
 
 		valueBytes: []byte(conf.Text.Value),
 
-		mCount:     stats.GetCounter("processor.text.count"),
-		mSucc:      stats.GetCounter("processor.text.success"),
-		mErr:       stats.GetCounter("processor.text.error"),
-		mSent:      stats.GetCounter("processor.text.sent"),
-		mSentParts: stats.GetCounter("processor.text.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}
 
 	t.interpolate = text.ContainsFunctionVariables(t.valueBytes)
@@ -228,7 +309,6 @@ func NewText(
 // resulting messages or a response to be sent back to the message source.
 func (t *Text) ProcessMessage(msg types.Message) ([]types.Message, types.Response) {
 	t.mCount.Incr(1)
-
 	newMsg := msg.Copy()
 
 	valueBytes := t.valueBytes
@@ -236,32 +316,42 @@ func (t *Text) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 		valueBytes = text.ReplaceFunctionVariables(msg, valueBytes)
 	}
 
-	targetParts := t.parts
-	if len(targetParts) == 0 {
-		targetParts = make([]int, newMsg.Len())
-		for i := range targetParts {
-			targetParts[i] = i
-		}
-	}
-
-	for _, index := range targetParts {
+	proc := func(index int) {
 		data := newMsg.Get(index).Get()
 		var err error
 		if data, err = t.operator(data, valueBytes); err != nil {
 			t.mErr.Incr(1)
 			t.log.Debugf("Failed to apply operator: %v\n", err)
-			continue
+			FlagFail(newMsg.Get(index))
+			return
 		}
-
 		newMsg.Get(index).Set(data)
-		t.mSucc.Incr(1)
+	}
+
+	if len(t.parts) == 0 {
+		for i := 0; i < msg.Len(); i++ {
+			proc(i)
+		}
+	} else {
+		for _, i := range t.parts {
+			proc(i)
+		}
 	}
 
 	msgs := [1]types.Message{newMsg}
 
-	t.mSent.Incr(1)
-	t.mSentParts.Incr(int64(newMsg.Len()))
+	t.mBatchSent.Incr(1)
+	t.mSent.Incr(int64(newMsg.Len()))
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (t *Text) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (t *Text) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

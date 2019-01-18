@@ -1,7 +1,7 @@
 {
 	"http": {
 		"address": "0.0.0.0:4195",
-		"read_timeout_ms": 5000,
+		"read_timeout": "5s",
 		"root_path": "/benthos",
 		"debug_endpoints": false
 	},
@@ -10,6 +10,7 @@
 		"amqp": {
 			"bindings_declare": [],
 			"consumer_tag": "benthos-consumer",
+			"max_batch_count": 1,
 			"prefetch_count": 10,
 			"prefetch_size": 0,
 			"queue": "benthos-queue",
@@ -18,8 +19,9 @@
 				"enabled": false
 			},
 			"tls": {
-				"cas_file": "",
+				"client_certs": [],
 				"enabled": false,
+				"root_cas_file": "",
 				"skip_cert_verify": false
 			},
 			"url": "amqp://guest:guest@localhost:5672/"
@@ -47,8 +49,9 @@
 			"mandatory": false,
 			"persistent": false,
 			"tls": {
-				"cas_file": "",
+				"client_certs": [],
 				"enabled": false,
+				"root_cas_file": "",
 				"skip_cert_verify": false
 			},
 			"url": "amqp://guest:guest@localhost:5672/"
@@ -56,23 +59,22 @@
 	},
 	"resources": {
 		"caches": {},
-		"conditions": {}
+		"conditions": {},
+		"rate_limits": {}
 	},
 	"logger": {
 		"prefix": "benthos",
 		"level": "INFO",
 		"add_timestamp": true,
-		"json_format": true
+		"json_format": true,
+		"static_fields": {
+			"@service": "benthos"
+		}
 	},
 	"metrics": {
 		"type": "http_server",
-		"prefix": "benthos",
 		"http_server": {},
-		"prometheus": {},
-		"statsd": {
-			"address": "localhost:4040",
-			"flush_period": "100ms",
-			"network": "udp"
-		}
-	}
+		"prefix": "benthos"
+	},
+	"shutdown_timeout": "20s"
 }

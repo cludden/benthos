@@ -48,6 +48,8 @@ type MmapBuffer struct {
 	logger log.Modular
 	stats  metrics.Type
 
+	retryPeriod time.Duration
+
 	mCacheErr metrics.StatCounter
 
 	readFrom  int
@@ -73,12 +75,19 @@ func NewMmapBuffer(config MmapBufferConfig, log log.Modular, stats metrics.Type)
 		cache:      cache,
 		logger:     log,
 		stats:      stats,
-		mCacheErr:  stats.GetCounter("cache.open.error"),
+		mCacheErr:  stats.GetCounter("open.error"),
 		readFrom:   0,
 		readIndex:  0,
 		writtenTo:  0,
 		writeIndex: 0,
 		closed:     false,
+	}
+
+	if tout := config.RetryPeriod; len(tout) > 0 {
+		var err error
+		if f.retryPeriod, err = time.ParseDuration(tout); err != nil {
+			return nil, fmt.Errorf("failed to parse retry period string: %v", err)
+		}
 	}
 
 	f.readTracker()
@@ -152,7 +161,7 @@ func (f *MmapBuffer) cacheManagerLoop(indexPtr *int) {
 			f.mCacheErr.Incr(1)
 
 			f.cache.L.Unlock()
-			<-time.After(time.Duration(f.config.RetryPeriodMS) * time.Millisecond)
+			<-time.After(f.retryPeriod)
 			f.cache.L.Lock()
 		} else if !bootstrapped {
 			bootstrapped = true

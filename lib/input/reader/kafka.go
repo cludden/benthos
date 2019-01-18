@@ -22,6 +22,7 @@ package reader
 
 import (
 	"crypto/tls"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,11 +43,12 @@ type KafkaConfig struct {
 	Addresses       []string    `json:"addresses" yaml:"addresses"`
 	ClientID        string      `json:"client_id" yaml:"client_id"`
 	ConsumerGroup   string      `json:"consumer_group" yaml:"consumer_group"`
-	CommitPeriodMS  int         `json:"commit_period_ms" yaml:"commit_period_ms"`
+	CommitPeriod    string      `json:"commit_period" yaml:"commit_period"`
 	Topic           string      `json:"topic" yaml:"topic"`
 	Partition       int32       `json:"partition" yaml:"partition"`
 	StartFromOldest bool        `json:"start_from_oldest" yaml:"start_from_oldest"`
 	TargetVersion   string      `json:"target_version" yaml:"target_version"`
+	MaxBatchCount   int         `json:"max_batch_count" yaml:"max_batch_count"`
 	TLS             btls.Config `json:"tls" yaml:"tls"`
 }
 
@@ -56,11 +58,12 @@ func NewKafkaConfig() KafkaConfig {
 		Addresses:       []string{"localhost:9092"},
 		ClientID:        "benthos_kafka_input",
 		ConsumerGroup:   "benthos_consumer_group",
-		CommitPeriodMS:  1000,
+		CommitPeriod:    "1s",
 		Topic:           "benthos_stream",
 		Partition:       0,
 		StartFromOldest: true,
 		TargetVersion:   sarama.V1_0_0_0.String(),
+		MaxBatchCount:   1,
 		TLS:             btls.NewConfig(),
 	}
 }
@@ -79,6 +82,7 @@ type Kafka struct {
 	sMut sync.Mutex
 
 	offsetLastCommitted time.Time
+	commitPeriod        time.Duration
 
 	mRcvErr metrics.StatCounter
 
@@ -100,8 +104,8 @@ func NewKafka(
 		offset:  0,
 		conf:    conf,
 		stats:   stats,
-		mRcvErr: stats.GetCounter("input.kafka.recv.error"),
-		log:     log.NewModule(".input.kafka"),
+		mRcvErr: stats.GetCounter("recv.error"),
+		log:     log,
 	}
 
 	if conf.TLS.Enabled {
@@ -121,6 +125,13 @@ func NewKafka(
 			if len(splitAddr) > 0 {
 				k.addresses = append(k.addresses, splitAddr)
 			}
+		}
+	}
+
+	if tout := conf.CommitPeriod; len(tout) > 0 {
+		var err error
+		if k.commitPeriod, err = time.ParseDuration(tout); err != nil {
+			return nil, fmt.Errorf("failed to parse commit period string: %v", err)
 		}
 	}
 	return &k, nil
@@ -272,23 +283,47 @@ func (k *Kafka) Read() (types.Message, error) {
 		return nil, types.ErrNotConnected
 	}
 
+	msg := message.New(nil)
+	addPart := func(data *sarama.ConsumerMessage) {
+		k.offset = data.Offset + 1
+		part := message.NewPart(data.Value)
+
+		meta := part.Metadata()
+		for _, hdr := range data.Headers {
+			meta.Set(string(hdr.Key), string(hdr.Value))
+		}
+		meta.Set("kafka_key", string(data.Key))
+		meta.Set("kafka_partition", strconv.Itoa(int(data.Partition)))
+		meta.Set("kafka_topic", data.Topic)
+		meta.Set("kafka_offset", strconv.Itoa(int(data.Offset)))
+		meta.Set("kafka_timestamp_unix", strconv.FormatInt(data.Timestamp.Unix(), 10))
+
+		msg.Append(part)
+	}
+
 	data, open := <-partConsumer.Messages()
 	if !open {
 		return nil, types.ErrTypeClosed
 	}
-	k.offset = data.Offset + 1
-	msg := message.New([][]byte{data.Value})
+	addPart(data)
 
-	meta := msg.Get(0).Metadata()
-	meta.Set("kafka_key", string(data.Key))
-	meta.Set("kafka_partition", strconv.Itoa(int(data.Partition)))
-	meta.Set("kafka_topic", data.Topic)
-	meta.Set("kafka_offset", strconv.Itoa(int(data.Offset)))
-	meta.Set("kafka_timestamp_unix", strconv.FormatInt(data.Timestamp.Unix(), 10))
-	for _, hdr := range data.Headers {
-		meta.Set(string(hdr.Key), string(hdr.Value))
+batchLoop:
+	for i := 1; i < k.conf.MaxBatchCount; i++ {
+		select {
+		case data, open = <-partConsumer.Messages():
+			if !open {
+				return nil, types.ErrTypeClosed
+			}
+			addPart(data)
+		default:
+			// Drained the buffer
+			break batchLoop
+		}
 	}
 
+	if msg.Len() == 0 {
+		return nil, types.ErrTimeout
+	}
 	return msg, nil
 }
 
@@ -298,8 +333,7 @@ func (k *Kafka) Acknowledge(err error) error {
 		k.offsetCommit = k.offset
 	}
 
-	if time.Since(k.offsetLastCommitted) <
-		(time.Millisecond * time.Duration(k.conf.CommitPeriodMS)) {
+	if time.Since(k.offsetLastCommitted) < k.commitPeriod {
 		return nil
 	}
 

@@ -22,13 +22,13 @@ package processor
 
 import (
 	"math"
-
-	"github.com/OneOfOne/xxhash"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
 	"github.com/Jeffail/benthos/lib/response"
 	"github.com/Jeffail/benthos/lib/types"
+	"github.com/OneOfOne/xxhash"
 )
 
 //------------------------------------------------------------------------------
@@ -37,12 +37,15 @@ func init() {
 	Constructors[TypeHashSample] = TypeSpec{
 		constructor: NewHashSample,
 		description: `
-Retains a percentage of messages deterministically by hashing selected parts of
-the message and checking the hash against a valid range, dropping all others.
+Retains a percentage of message batches deterministically by hashing selected
+messages and checking the hash against a valid range, dropping all others.
 
 For example, setting ` + "`retain_min` to `0.0` and `remain_max` to `50.0`" + `
 results in dropping half of the input stream, and setting ` + "`retain_min`" + `
-to ` + "`50.0` and `retain_max` to `100.1`" + ` will drop the _other_ half.`,
+to ` + "`50.0` and `retain_max` to `100.1`" + ` will drop the _other_ half.
+
+In order to sample individual messages of a batch use this processor with the
+` + "[`process_batch`](#process_batch)" + ` processor.`,
 	}
 }
 
@@ -86,9 +89,9 @@ type HashSample struct {
 	mCount     metrics.StatCounter
 	mDropOOB   metrics.StatCounter
 	mDropped   metrics.StatCounter
-	mErrHash   metrics.StatCounter
+	mErr       metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewHashSample returns a HashSample processor.
@@ -97,15 +100,15 @@ func NewHashSample(
 ) (Type, error) {
 	return &HashSample{
 		conf:  conf,
-		log:   log.NewModule(".processor.hash_sample"),
+		log:   log,
 		stats: stats,
 
-		mCount:     stats.GetCounter("processor.hash_sample.count"),
-		mDropOOB:   stats.GetCounter("processor.hash_sample.dropped_part_out_of_bounds"),
-		mDropped:   stats.GetCounter("processor.hash_sample.dropped"),
-		mErrHash:   stats.GetCounter("processor.hash_sample.hashing_error"),
-		mSent:      stats.GetCounter("processor.hash_sample.sent"),
-		mSentParts: stats.GetCounter("processor.hash_sample.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mDropOOB:   stats.GetCounter("dropped_part_out_of_bounds"),
+		mDropped:   stats.GetCounter("dropped"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -135,7 +138,7 @@ func (s *HashSample) ProcessMessage(msg types.Message) ([]types.Message, types.R
 
 		// Attempt to add part to hash.
 		if _, err := hash.Write(msg.Get(index).Get()); nil != err {
-			s.mErrHash.Incr(1)
+			s.mErr.Incr(1)
 			s.log.Debugf("Cannot hash message part for sampling: %v\n", err)
 			return nil, response.NewAck()
 		}
@@ -143,14 +146,23 @@ func (s *HashSample) ProcessMessage(msg types.Message) ([]types.Message, types.R
 
 	rate := scaleNum(hash.Sum64())
 	if rate >= s.conf.HashSample.RetainMin && rate < s.conf.HashSample.RetainMax {
-		s.mSent.Incr(1)
-		s.mSentParts.Incr(int64(msg.Len()))
+		s.mBatchSent.Incr(1)
+		s.mSent.Incr(int64(msg.Len()))
 		msgs := [1]types.Message{msg}
 		return msgs[:], nil
 	}
 
-	s.mDropped.Incr(1)
+	s.mDropped.Incr(int64(msg.Len()))
 	return nil, response.NewAck()
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (s *HashSample) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (s *HashSample) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

@@ -5,25 +5,440 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
-### 0.26.2 - 2018-08-27
+## 1.1.0 - 2019-01-17
+
+### Added
+
+- Input `s3` can now toggle the use of a download manager, switching off now
+  downloads metadata from the target file.
+- Output `s3` now writes metadata to the uploaded file.
+- Operator `unescape_url_query` added to `text` processor.
+
+### Fixed
+
+- The `nats_steam` input and output now actively attempt to recover stale
+  connections.
+- The `awk` processor prints errors and flags failure when the program exits
+  with a non-zero status.
+
+## 1.0.2 - 2019-01-07
+
+### Fixed
+
+- The `subprocess` processor now attempts to read all flushed stderr output from
+  a process when it fails.
+
+## 1.0.1 - 2019-01-05
+
+### Added
+
+- Function `print_log` added to `awk` processor.
+
+### Fixed
+
+- The `awk` processor function `json_get` no longer returns string values with
+  quotes.
+
+## 1.0.0 - 2019-01-01
+
+### Changed
+
+- Processor `awk` codecs changed.
+
+## 0.42.4 - 2018-12-31
+
+### Changed
+
+- Output type `sqs` now supports batched message sends.
+
+## 0.42.3 - 2018-12-28
+
+### Added
+
+- Functions `json_get` and `json_set` added to `awk` processor.
+
+## 0.42.1 - 2018-12-20
+
+### Added
+
+- Functions `timestamp_format`, `timestamp_format_nano`, `metadata_get` and
+  `metadata_set` added to `awk` processor.
+
+## 0.42.0 - 2018-12-19
+
+### Added
+
+- New `sleep` processor.
+- New `awk` processor.
+
+### Changed
+
+- Converted all integer based time period fields to string based, e.g.
+  `timeout_ms: 5000` would now be `timeout: 5s`. This will may potentially be
+  disruptive but the `--strict` flag should catch all deprecated fields in an
+  existing config.
+
+## 0.41.0 - 2018-12-12
+
+### Changed
+
+- Renamed `max_batch_size` to `max_batch_count` for consistency.
+
+## 0.40.2 - 2018-12-12
+
+### Added
+
+- New `max_batch_size` field added to `kafka`, `kafka_balanced` and `amqp`
+  inputs. This provides a mechanism for creating message batches optimistically.
+
+## 0.40.0 - 2018-12-10
+
+### Added
+
+- New `subprocess` processor.
+
+### Changed
+
+- API: The `types.Processor` interface has been changed in order to add lifetime
+  cleanup methods (added `CloseAsync` and `WaitForClose`). For the overwhelming
+  majority of processors these functions will be no-ops.
+- More consistent `condition` metrics.
+
+## 0.39.2 - 2018-12-07
+
+### Added
+
+- New `try` and `catch` processors for improved processor error handling.
+
+## 0.39.1 - 2018-12-07
+
+### Added
+
+- All processors now attach error flags.
+- S3 input is now more flexible with SNS triggered SQS events.
+
+### Changed
+
+- Processor metrics have been made more consistent.
+
+## 0.39.0 - 2018-12-05
+
+### Added
+
+- New endpoint `/ready` that returns 200 when both the input and output
+  components are connected, otherwise 503. This is intended to be used as a
+  readiness probe.
+
+### Changed
+
+- Large simplifications to all metrics paths.
+- Fully removed the previously deprecated `combine` processor.
+- Input and output plugins updated to support new connection health checks.
+
+## 0.38.10 - 2018-12-04
+
+### Added
+
+- Field `role_external_id` added to all S3 credential configs.
+- New `processor_failed` condition and improved processor error handling which
+  can be read about [here](./docs/error_handling.md)
+
+## 0.38.8 - 2018-11-29
+
+### Added
+
+- New `content_type` field for the `s3` output.
+
+## 0.38.6 - 2018-11-28
+
+### Added
+
+- New `group_by_value` processor.
+
+## 0.38.5 - 2018-11-27
+
+### Added
+
+- Lint errors are logged (level INFO) during normal Benthos operation.
+- New `--strict` command flag which causes Benthos to abort when linting errors
+  are found in a config file.
+
+## 0.38.4 - 2018-11-26
+
+### Added
+
+- New `--lint` command flag for linting config files.
+
+## 0.38.1 - 2018-11-23
+
+### Changed
+
+- The `s3` output now attempts to batch uploads.
+- The `s3` input now exposes errors in deleting SQS messages during acks.
+
+## 0.38.0 - 2018-11-22
+
+### Changed
+
+- Resource based conditions no longer benefit from cached results. In practice
+  this optimisation was easy to lose in config and difficult to maintain.
+
+## 0.37.4 - 2018-11-22
+
+### Added
+
+- Metadata is now sent to `kafka` outputs.
+- New `max_inflight` field added to the `nats_stream` input.
+
+### Fixed
+
+- Fixed relative path trimming for streams from file directories.
+
+## 0.37.2 - 2018-11-15
+
+### Fixed
+
+- The `dynamodb` cache and output types now set TTL columns as unix timestamps.
+
+## 0.37.1 - 2018-11-13
+
+### Added
+
+- New `escape_url_query` operator for the `text` processor.
+
+## 0.37.0 - 2018-11-09
+
+### Changed
+
+- Removed submatch indexes in the `text` processor `find_regexp` operator and
+  added documentation for expanding submatches in the `replace_regexp` operator.
+
+## 0.36.4 - 2018-11-09
+
+### Added
+
+- Allow submatch indexes in the `find_regexp` operator for the `text` processor.
+
+## 0.36.3 - 2018-11-08
+
+### Added
+
+- New `find_regexp` operator for the `text` processor.
+
+## 0.36.1 - 2018-11-07
+
+### Added
+
+- New `aws` fields to the `elasticsearch` output to allow AWS authentication.
+
+## 0.36.0 - 2018-11-06
+
+### Added
+
+- Add max-outstanding fields to `gcp_pubsub` input.
+- Add new `dynamodb` output.
+
+### Changed
+
+- The `s3` output now calculates `path` field function interpolations per
+  message of a batch.
+
+## 0.35.1 - 2018-10-31
+
+### Added
+
+- New `set` operator for the `text` processor.
+
+## 0.35.0 - 2018-10-30
+
+### Added
+
+- New `cache` output type.
+
+## 0.34.13 - 2018-10-29
+
+### Added
+
+- New `group_by` processor.
+- Add bulk send support to `elasticsearch` output.
+
+## 0.34.8 - 2018-10-10
+
+### Added
+
+- New `content` interpolation function.
+
+## 0.34.7 - 2018-10-04
+
+### Added
+
+- New `redis` cache type.
+
+## 0.34.5 - 2018-10-02
+
+### Changed
+
+- The `process_map` processor now allows map target path overrides when a target
+  is the parent of another target.
+
+## 0.34.4 - 2018-10-02
+
+### Added
+
+- Field `pipeline` and `sniff` added to the `elasticsearch` output.
+- Operators `to_lower` and `to_upper` added to the `text` processor.
+
+## 0.34.3 - 2018-09-29
+
+### Added
+
+- Field `endpoint` added to all AWS types.
+
+## 0.34.2 - 2018-09-27
+
+### Changed
+
+- Allow `log` config field `static_fields` to be fully overridden.
+
+## 0.34.0 - 2018-09-27
+
+### Added
+
+- New `process_dag` processor.
+- New `static_fields` map added to log config for setting static log fields.
+
+### Changed
+
+- JSON log field containing component path moved from `@service` to `component`.
+
+## 0.33.0 - 2018-09-22
+
+### Added
+
+- New `gcp_pubsub` input and outputs.
+- New `log` processor.
+- New `lambda` processor.
+
+## 0.32.0 - 2018-09-18
+
+### Added
+
+- New `process_batch` processor.
+- Added `count` field to `batch` processor.
+- Metrics for `kinesis` output throttles.
+
+### Changed
+
+- The `combine` processor is now considered DEPRECATED, please use the `batch`
+  processor instead.
+- The `batch` processor field `byte_size` is now set at 0 (and therefore
+  ignored) by default. A log warning has been added in case anyone was relying
+  on the default.
+
+## 0.31.4 - 2018-09-16
+
+### Added
+
+- New `rate_limit` resource with a `local` type.
+- Field `rate_limit` added to `http` based processors, inputs and outputs.
+
+## 0.31.2 - 2018-09-14
+
+### Added
+
+- New `prefetch_count` field added to `nats` input.
+
+## 0.31.0 - 2018-09-11
+
+### Added
+
+- New `bounds_check` condition type.
+- New `check_field` condition type.
+- New `queue` field added to `nats` input.
+- Function interpolation for the `topic` field of the `nsq` output.
+
+### Changed
+
+- The `nats` input now defaults to joining a queue.
+
+## 0.30.1 - 2018-09-06
+
+### Changed
+
+- The redundant `nsq` output field `max_in_flight` has been removed.
+- The `files` output now interpolates paths per message part of a batch.
+
+## 0.30.0 - 2018-09-06
+
+### Added
+
+- New `hdfs` input and output.
+- New `switch` output.
+- New `enum` and `has_prefix` operators for the `metadata` condition.
+- Ability to set `tls` client certificate fields directly.
+
+## 0.29.0 - 2018-09-02
+
+### Added
+
+- New `retry` output.
+- Added `regex_partial` and `regex_exact` operators to the `metadata` condition.
+
+### Changed
+
+- The `kinesis` output field `retries` has been renamed `max_retries` in order
+  to expose the difference in its zero value behaviour (endless retries) versus
+  other `retry` fields (zero retries).
+
+## 0.28.0 - 2018-09-01
+
+### Added
+
+- New `endpoint` field added to `kinesis` input.
+- New `dynamodb` cache type.
+
+## 0.27.0 - 2018-08-30
+
+### Added
+
+- Function interpolation for the `topic` field of the `kafka` output.
+- New `target_version` field for the `kafka_balanced` input.
+- TLS config fields for client certificates.
+
+### Changed
+
+- TLS config field `cas_file` has been renamed `root_cas_file`.
+
+## 0.26.3 - 2018-08-29
+
+### Added
+
+- New `zip` option for the `archive` and `unarchive` processors.
+
+### Changed
+
+- The `kinesis` output type now supports batched sends and per message
+  interpolation.
+
+## 0.26.2 - 2018-08-27
 
 ### Added
 
 - New `metric` processor.
 
-### 0.26.1 - 2018-08-26
+## 0.26.1 - 2018-08-26
 
 ### Added
 
 - New `redis_streams` input and output.
 
-### 0.26.0 - 2018-08-25
+## 0.26.0 - 2018-08-25
 
 ### Added
 
 - New `kinesis` input and output.
 
-### 0.25.0 - 2018-08-22
+## 0.25.0 - 2018-08-22
 
 ### Added
 
@@ -35,7 +450,7 @@ All notable changes to this project will be documented in this file.
 
 - API: The `metrics.Type` interface has been changed in order to add labels.
 
-### 0.24.0 - 2018-08-17
+## 0.24.0 - 2018-08-17
 
 ### Changed
 
@@ -43,43 +458,43 @@ All notable changes to this project will be documented in this file.
   be backwards compatible for existing pipelines, but changes the way in which
   queues, exchanges and bindings are declared using these types.
 
-### 0.23.17 - 2018-08-17
+## 0.23.17 - 2018-08-17
 
 ### Added
 
 - New durable fields for `amqp` input and output types.
 
-### 0.23.15 - 2018-08-16
+## 0.23.15 - 2018-08-16
 
 ### Changed
 
 - Improved statsd client with better cached aggregation.
 
-### 0.23.14 - 2018-08-16
+## 0.23.14 - 2018-08-16
 
 ### Added
 
 - New `tls` fields for `amqp` input and output types.
 
-### 0.23.12 - 2018-08-14
+## 0.23.12 - 2018-08-14
 
 ### Added
 
 - New `type` field for `elasticsearch` output.
 
-### 0.23.9 - 2018-08-10
+## 0.23.9 - 2018-08-10
 
 ### Added
 
 - New `throttle` processor.
 
-### 0.23.6 - 2018-08-09
+## 0.23.6 - 2018-08-09
 
 ### Added
 
 - New `less_than` and `greater_than` operators for `metadata` condition.
 
-### 0.23.4 - 2018-08-09
+## 0.23.4 - 2018-08-09
 
 ### Added
 
@@ -88,7 +503,7 @@ All notable changes to this project will be documented in this file.
 - Field `commit_period_ms` for `kafka` and `kafka_balanced` inputs for
   specifying a commit period.
 
-### 0.23.1 - 2018-08-06
+## 0.23.1 - 2018-08-06
 
 ### Added
 
@@ -98,7 +513,7 @@ All notable changes to this project will be documented in this file.
   input.
 - Added field to `split` processor for specifying target batch sizes.
 
-### 0.23.0 - 2018-08-06
+## 0.23.0 - 2018-08-06
 
 ### Added
 
@@ -112,7 +527,7 @@ All notable changes to this project will be documented in this file.
   returns a JSON object when no key is specified, this behaviour can now be done
   using the `metadata_json_object` function.
 
-### 0.22.0 - 2018-08-03
+## 0.22.0 - 2018-08-03
 
 ### Added
 
@@ -129,7 +544,7 @@ All notable changes to this project will be documented in this file.
   and output types.
 - Removed deprecated `json_fields` field from the `dedupe` processor.
 
-### 0.21.0 - 2018-07-31
+## 0.21.0 - 2018-07-31
 
 ### Added
 
@@ -141,7 +556,7 @@ All notable changes to this project will be documented in this file.
   the `kafka`, `kafka_balanced` and `http_client` input and output types, as
   well as the `http` processor type.
 
-### 0.20.8 - 2018-07-30
+## 0.20.8 - 2018-07-30
 
 ### Added
 
@@ -151,7 +566,7 @@ All notable changes to this project will be documented in this file.
   this includes the `http_client` input and output as well as the `http`
   processor.
 
-### 0.20.7 - 2018-07-27
+## 0.20.7 - 2018-07-27
 
 ### Added
 

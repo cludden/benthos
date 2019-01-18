@@ -21,14 +21,14 @@
 package cache
 
 import (
+	"fmt"
 	"strings"
 	"time"
-
-	"github.com/bradfitz/gomemcache/memcache"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
 	"github.com/Jeffail/benthos/lib/types"
+	"github.com/bradfitz/gomemcache/memcache"
 )
 
 //------------------------------------------------------------------------------
@@ -46,21 +46,21 @@ multiple cache types to share a memcached cluster under different namespaces.`,
 
 // MemcachedConfig is a config struct for a memcached connection.
 type MemcachedConfig struct {
-	Addresses     []string `json:"addresses" yaml:"addresses"`
-	Prefix        string   `json:"prefix" yaml:"prefix"`
-	TTL           int32    `json:"ttl" yaml:"ttl"`
-	Retries       int      `json:"retries" yaml:"retries"`
-	RetryPeriodMS int      `json:"retry_period_ms" yaml:"retry_period_ms"`
+	Addresses   []string `json:"addresses" yaml:"addresses"`
+	Prefix      string   `json:"prefix" yaml:"prefix"`
+	TTL         int32    `json:"ttl" yaml:"ttl"`
+	Retries     int      `json:"retries" yaml:"retries"`
+	RetryPeriod string   `json:"retry_period" yaml:"retry_period"`
 }
 
 // NewMemcachedConfig returns a MemcachedConfig with default values.
 func NewMemcachedConfig() MemcachedConfig {
 	return MemcachedConfig{
-		Addresses:     []string{"localhost:11211"},
-		Prefix:        "",
-		TTL:           300,
-		Retries:       3,
-		RetryPeriodMS: 500,
+		Addresses:   []string{"localhost:11211"},
+		Prefix:      "",
+		TTL:         300,
+		Retries:     3,
+		RetryPeriod: "500ms",
 	}
 }
 
@@ -112,36 +112,43 @@ func NewMemcached(
 			}
 		}
 	}
+	var retryPeriod time.Duration
+	if tout := conf.Memcached.RetryPeriod; len(tout) > 0 {
+		var err error
+		if retryPeriod, err = time.ParseDuration(tout); err != nil {
+			return nil, fmt.Errorf("failed to parse retry period string: %v", err)
+		}
+	}
 	return &Memcached{
 		conf:  conf,
-		log:   log.NewModule(".cache.memcached"),
+		log:   log,
 		stats: stats,
 
-		mLatency:       stats.GetTimer("cache.memcached.latency"),
-		mGetCount:      stats.GetCounter("cache.memcached.get.count"),
-		mGetRetry:      stats.GetCounter("cache.memcached.get.retry"),
-		mGetFailed:     stats.GetCounter("cache.memcached.get.failed.error"),
-		mGetSuccess:    stats.GetCounter("cache.memcached.get.success"),
-		mGetLatency:    stats.GetTimer("cache.memcached.get.latency"),
-		mSetCount:      stats.GetCounter("cache.memcached.set.count"),
-		mSetRetry:      stats.GetCounter("cache.memcached.set.retry"),
-		mSetFailed:     stats.GetCounter("cache.memcached.set.failed.error"),
-		mSetSuccess:    stats.GetCounter("cache.memcached.set.success"),
-		mSetLatency:    stats.GetTimer("cache.memcached.set.latency"),
-		mAddCount:      stats.GetCounter("cache.memcached.add.count"),
-		mAddDupe:       stats.GetCounter("cache.memcached.add.failed.duplicate"),
-		mAddRetry:      stats.GetCounter("cache.memcached.add.retry"),
-		mAddFailedDupe: stats.GetCounter("cache.memcached.add.failed.duplicate"),
-		mAddFailedErr:  stats.GetCounter("cache.memcached.add.failed.error"),
-		mAddSuccess:    stats.GetCounter("cache.memcached.add.success"),
-		mAddLatency:    stats.GetTimer("cache.memcached.add.latency"),
-		mDelCount:      stats.GetCounter("cache.memcached.delete.count"),
-		mDelRetry:      stats.GetCounter("cache.memcached.delete.retry"),
-		mDelFailedErr:  stats.GetCounter("cache.memcached.delete.failed.error"),
-		mDelSuccess:    stats.GetCounter("cache.memcached.delete.success"),
-		mDelLatency:    stats.GetTimer("cache.memcached.del.latency"),
+		mLatency:       stats.GetTimer("latency"),
+		mGetCount:      stats.GetCounter("get.count"),
+		mGetRetry:      stats.GetCounter("get.retry"),
+		mGetFailed:     stats.GetCounter("get.failed.error"),
+		mGetSuccess:    stats.GetCounter("get.success"),
+		mGetLatency:    stats.GetTimer("get.latency"),
+		mSetCount:      stats.GetCounter("set.count"),
+		mSetRetry:      stats.GetCounter("set.retry"),
+		mSetFailed:     stats.GetCounter("set.failed.error"),
+		mSetSuccess:    stats.GetCounter("set.success"),
+		mSetLatency:    stats.GetTimer("set.latency"),
+		mAddCount:      stats.GetCounter("add.count"),
+		mAddDupe:       stats.GetCounter("add.failed.duplicate"),
+		mAddRetry:      stats.GetCounter("add.retry"),
+		mAddFailedDupe: stats.GetCounter("add.failed.duplicate"),
+		mAddFailedErr:  stats.GetCounter("add.failed.error"),
+		mAddSuccess:    stats.GetCounter("add.success"),
+		mAddLatency:    stats.GetTimer("add.latency"),
+		mDelCount:      stats.GetCounter("delete.count"),
+		mDelRetry:      stats.GetCounter("delete.retry"),
+		mDelFailedErr:  stats.GetCounter("delete.failed.error"),
+		mDelSuccess:    stats.GetCounter("delete.success"),
+		mDelLatency:    stats.GetTimer("delete.latency"),
 
-		retryPeriod: time.Duration(conf.Memcached.RetryPeriodMS) * time.Millisecond,
+		retryPeriod: retryPeriod,
 		mc:          memcache.New(addresses...),
 	}, nil
 }
@@ -207,6 +214,18 @@ func (m *Memcached) Set(key string, value []byte) error {
 	m.mLatency.Timing(latency)
 
 	return err
+}
+
+// SetMulti attempts to set the value of multiple keys, returns an error if any
+// keys fail.
+func (m *Memcached) SetMulti(items map[string][]byte) error {
+	// TODO: Come back and optimise this.
+	for k, v := range items {
+		if err := m.Set(k, v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Add attempts to set the value of a key only if the key does not already exist

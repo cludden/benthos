@@ -1,7 +1,7 @@
 {
 	"http": {
 		"address": "0.0.0.0:4195",
-		"read_timeout_ms": 5000,
+		"read_timeout": "5s",
 		"root_path": "/benthos",
 		"debug_endpoints": false
 	},
@@ -12,14 +12,16 @@
 				"localhost:9092"
 			],
 			"client_id": "benthos_kafka_input",
-			"commit_period_ms": 1000,
+			"commit_period": "1s",
 			"consumer_group": "benthos_consumer_group",
+			"max_batch_count": 1,
 			"partition": 0,
 			"start_from_oldest": true,
 			"target_version": "1.0.0",
 			"tls": {
-				"cas_file": "",
+				"client_certs": [],
 				"enabled": false,
+				"root_cas_file": "",
 				"skip_cert_verify": false
 			},
 			"topic": "benthos_stream"
@@ -46,10 +48,11 @@
 			"max_msg_bytes": 1000000,
 			"round_robin_partitions": false,
 			"target_version": "1.0.0",
-			"timeout_ms": 5000,
+			"timeout": "5s",
 			"tls": {
-				"cas_file": "",
+				"client_certs": [],
 				"enabled": false,
+				"root_cas_file": "",
 				"skip_cert_verify": false
 			},
 			"topic": "benthos_stream"
@@ -57,23 +60,22 @@
 	},
 	"resources": {
 		"caches": {},
-		"conditions": {}
+		"conditions": {},
+		"rate_limits": {}
 	},
 	"logger": {
 		"prefix": "benthos",
 		"level": "INFO",
 		"add_timestamp": true,
-		"json_format": true
+		"json_format": true,
+		"static_fields": {
+			"@service": "benthos"
+		}
 	},
 	"metrics": {
 		"type": "http_server",
-		"prefix": "benthos",
 		"http_server": {},
-		"prometheus": {},
-		"statsd": {
-			"address": "localhost:4040",
-			"flush_period": "100ms",
-			"network": "udp"
-		}
-	}
+		"prefix": "benthos"
+	},
+	"shutdown_timeout": "20s"
 }

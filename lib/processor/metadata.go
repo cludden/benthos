@@ -23,6 +23,7 @@ package processor
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -147,9 +148,8 @@ type Metadata struct {
 
 	mCount     metrics.StatCounter
 	mErr       metrics.StatCounter
-	mSucc      metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewMetadata returns a Metadata processor.
@@ -158,18 +158,17 @@ func NewMetadata(
 ) (Type, error) {
 	m := &Metadata{
 		conf:  conf,
-		log:   log.NewModule(".processor.metadata"),
+		log:   log,
 		stats: stats,
 
 		parts: conf.Metadata.Parts,
 
 		valueBytes: []byte(conf.Metadata.Value),
 
-		mCount:     stats.GetCounter("processor.metadata.count"),
-		mErr:       stats.GetCounter("processor.metadata.error"),
-		mSucc:      stats.GetCounter("processor.metadata.success"),
-		mSent:      stats.GetCounter("processor.metadata.sent"),
-		mSentParts: stats.GetCounter("processor.metadata.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}
 
 	m.interpolate = text.ContainsFunctionVariables(m.valueBytes)
@@ -187,7 +186,6 @@ func NewMetadata(
 // resulting messages or a response to be sent back to the message source.
 func (p *Metadata) ProcessMessage(msg types.Message) ([]types.Message, types.Response) {
 	p.mCount.Incr(1)
-
 	newMsg := msg.Copy()
 
 	valueBytes := p.valueBytes
@@ -195,26 +193,38 @@ func (p *Metadata) ProcessMessage(msg types.Message) ([]types.Message, types.Res
 		valueBytes = text.ReplaceFunctionVariables(msg, valueBytes)
 	}
 
-	targetParts := p.parts
-	if len(targetParts) == 0 {
-		targetParts = make([]int, newMsg.Len())
-		for i := range targetParts {
-			targetParts[i] = i
-		}
-	}
-
-	for _, index := range targetParts {
+	proc := func(index int) {
 		if err := p.operator(newMsg.Get(index).Metadata(), valueBytes); err != nil {
 			p.mErr.Incr(1)
 			p.log.Debugf("Failed to apply operator: %v\n", err)
+			FlagFail(newMsg.Get(index))
+		}
+	}
+
+	if len(p.parts) == 0 {
+		for i := 0; i < msg.Len(); i++ {
+			proc(i)
+		}
+	} else {
+		for _, i := range p.parts {
+			proc(i)
 		}
 	}
 
 	msgs := [1]types.Message{newMsg}
 
-	p.mSent.Incr(1)
-	p.mSentParts.Incr(int64(newMsg.Len()))
+	p.mBatchSent.Incr(1)
+	p.mSent.Incr(int64(newMsg.Len()))
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (p *Metadata) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (p *Metadata) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

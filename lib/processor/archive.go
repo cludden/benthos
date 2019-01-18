@@ -22,6 +22,7 @@ package processor
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"fmt"
 	"os"
@@ -41,14 +42,15 @@ func init() {
 	Constructors[TypeArchive] = TypeSpec{
 		constructor: NewArchive,
 		description: `
-Archives all the parts of a message into a single part according to the selected
-archive type. Supported archive types are: tar, binary, lines.
+Archives all the messages of a batch into a single message according to the
+selected archive format. Supported archive formats are: tar, zip, binary, lines.
 
-Some archive types (such as tar) treat each archive item (message part) as a
-file with a path. Since message parts only contain raw data a unique path must
-be generated for each part. This can be done by using function interpolations on
-the 'path' field as described [here](../config_interpolation.md#functions). For
-types that aren't file based (such as binary) the file field is ignored.
+Some archive formats (such as tar, zip) treat each archive item (message part)
+as a file with a path. Since message parts only contain raw data a unique path
+must be generated for each part. This can be done by using function
+interpolations on the 'path' field as described
+[here](../config_interpolation.md#functions). For types that aren't file based
+(such as binary) the file field is ignored.
 
 The resulting archived message adopts the metadata of the _first_ message part
 of the batch.`,
@@ -104,6 +106,36 @@ func tarArchive(hFunc headerFunc, msg types.Message) (types.Part, error) {
 		SetMetadata(msg.Get(0).Metadata().Copy()), nil
 }
 
+func zipArchive(hFunc headerFunc, msg types.Message) (types.Part, error) {
+	buf := &bytes.Buffer{}
+	zw := zip.NewWriter(buf)
+
+	// Iterate through the parts of the message.
+	err := msg.Iter(func(i int, part types.Part) error {
+		h, err := zip.FileInfoHeader(hFunc(part))
+		if err != nil {
+			return err
+		}
+		h.Method = zip.Deflate
+
+		w, err := zw.CreateHeader(h)
+		if err != nil {
+			return err
+		}
+		if _, err = w.Write(part.Get()); err != nil {
+			return err
+		}
+		return nil
+	})
+	zw.Close()
+
+	if err != nil {
+		return nil, err
+	}
+	return message.NewPart(buf.Bytes()).
+		SetMetadata(msg.Get(0).Metadata().Copy()), nil
+}
+
 func binaryArchive(hFunc headerFunc, msg types.Message) (types.Part, error) {
 	return message.NewPart(message.ToBytes(msg)).
 		SetMetadata(msg.Get(0).Metadata().Copy()), nil
@@ -123,6 +155,8 @@ func strToArchiver(str string) (archiveFunc, error) {
 	switch str {
 	case "tar":
 		return tarArchive, nil
+	case "zip":
+		return zipArchive, nil
 	case "binary":
 		return binaryArchive, nil
 	case "lines":
@@ -142,11 +176,11 @@ type Archive struct {
 	pathBytes       []byte
 	interpolatePath bool
 
-	mCount   metrics.StatCounter
-	mSkipped metrics.StatCounter
-	mErr     metrics.StatCounter
-	mSucc    metrics.StatCounter
-	mSent    metrics.StatCounter
+	mCount     metrics.StatCounter
+	mErr       metrics.StatCounter
+	mSucc      metrics.StatCounter
+	mSent      metrics.StatCounter
+	mBatchSent metrics.StatCounter
 
 	log   log.Modular
 	stats metrics.Type
@@ -169,14 +203,14 @@ func NewArchive(
 		pathBytes:       pathBytes,
 		interpolatePath: interpolatePath,
 		archive:         archiver,
-		log:             log.NewModule(".processor.archive"),
+		log:             log,
 		stats:           stats,
 
-		mCount:   stats.GetCounter("processor.archive.count"),
-		mSkipped: stats.GetCounter("processor.archive.skipped"),
-		mErr:     stats.GetCounter("processor.archive.error"),
-		mSucc:    stats.GetCounter("processor.archive.success"),
-		mSent:    stats.GetCounter("processor.archive.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErr:       stats.GetCounter("error"),
+		mSucc:      stats.GetCounter("success"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -229,25 +263,39 @@ func (d *Archive) ProcessMessage(msg types.Message) ([]types.Message, types.Resp
 	d.mCount.Incr(1)
 
 	if msg.Len() == 0 {
-		d.mSkipped.Incr(1)
 		return nil, response.NewAck()
 	}
+
+	d.mSent.Incr(1)
+	d.mBatchSent.Incr(1)
 
 	newPart, err := d.archive(d.createHeaderFunc(msg), msg)
 	if err != nil {
 		d.log.Errorf("Failed to create archive: %v\n", err)
 		d.mErr.Incr(1)
-		return nil, response.NewAck()
+		msg.Iter(func(i int, p types.Part) error {
+			FlagFail(p)
+			return nil
+		})
+		msgs := [1]types.Message{msg}
+		return msgs[:], nil
 	}
-
 	d.mSucc.Incr(1)
-	d.mSent.Incr(1)
 
 	newMsg := message.New(nil)
 	newMsg.Append(newPart)
 
 	msgs := [1]types.Message{newMsg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (d *Archive) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (d *Archive) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

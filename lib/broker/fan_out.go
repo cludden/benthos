@@ -61,7 +61,7 @@ func NewFanOut(
 	o := &FanOut{
 		running:      1,
 		stats:        stats,
-		logger:       logger.NewModule(".broker.fan_out"),
+		logger:       logger,
 		transactions: nil,
 		outputs:      outputs,
 		outputNs:     []int{},
@@ -96,6 +96,17 @@ func (o *FanOut) Consume(transactions <-chan types.Transaction) error {
 	return nil
 }
 
+// Connected returns a boolean indicating whether this output is currently
+// connected to its target.
+func (o *FanOut) Connected() bool {
+	for _, out := range o.outputs {
+		if !out.Connected() {
+			return false
+		}
+	}
+	return true
+}
+
 //------------------------------------------------------------------------------
 
 // loop is an internal loop that brokers incoming messages to many outputs.
@@ -108,9 +119,9 @@ func (o *FanOut) loop() {
 	}()
 
 	var (
-		mMsgsRcvd  = o.stats.GetCounter("broker.fan_out.messages.received")
-		mOutputErr = o.stats.GetCounter("broker.fan_out.output.error")
-		mMsgsSnt   = o.stats.GetCounter("broker.fan_out.messages.sent")
+		mMsgsRcvd  = o.stats.GetCounter("messages.received")
+		mOutputErr = o.stats.GetCounter("error")
+		mMsgsSnt   = o.stats.GetCounter("messages.sent")
 	)
 
 	for atomic.LoadInt32(&o.running) == 1 {

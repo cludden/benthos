@@ -21,6 +21,7 @@
 package processor
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
@@ -40,9 +41,12 @@ func init() {
 Reads a number of discrete messages, buffering (but not acknowledging) the
 message parts until either:
 
-- The total size of the batch in bytes matches or exceeds ` + "`byte_size`" + `.
+- The ` + "`byte_size`" + ` field is non-zero and the total size of the batch in
+  bytes matches or exceeds it.
+- The ` + "`count`" + ` field is non-zero and the total number of messages in
+  the batch matches or exceeds it.
 - A message added to the batch causes the condition to resolve ` + "`true`" + `.
-- The ` + "`period_ms`" + ` field is non-zero and the time since the last batch
+- The ` + "`period`" + ` field is non-empty and the time since the last batch
   exceeds its value.
 
 Once one of these events trigger the parts are combined into a single batch of
@@ -50,11 +54,11 @@ messages and sent through the pipeline. After reaching a destination the
 acknowledgment is sent out for all messages inside the batch at the same time,
 preserving at-least-once delivery guarantees.
 
-The ` + "`period_ms`" + ` field is optional, and when greater than zero defines
-a period in milliseconds whereby a batch is sent even if the ` + "`byte_size`" + `
-has not yet been reached. Batch parameters are only triggered when a message is
-added, meaning a pending batch can last beyond this period if no messages are
-added since the period was reached.
+The ` + "`period`" + ` field - when non-empty - defines a period of time whereby
+a batch is sent even if the ` + "`byte_size`" + ` has not yet been reached.
+Batch parameters are only triggered when a message is added, meaning a pending
+batch can last beyond this period if no messages are added since the period was
+reached.
 
 When a batch is sent to an output the behaviour will differ depending on the
 protocol. If the output type supports multipart messages then the batch is sent
@@ -73,8 +77,9 @@ unexpected behaviour and message ordering.`,
 			}
 			return map[string]interface{}{
 				"byte_size": conf.Batch.ByteSize,
+				"count":     conf.Batch.Count,
 				"condition": condSanit,
-				"period_ms": conf.Batch.PeriodMS,
+				"period":    conf.Batch.Period,
 			}, nil
 		},
 	}
@@ -85,8 +90,9 @@ unexpected behaviour and message ordering.`,
 // BatchConfig contains configuration fields for the Batch processor.
 type BatchConfig struct {
 	ByteSize  int              `json:"byte_size" yaml:"byte_size"`
+	Count     int              `json:"count" yaml:"count"`
 	Condition condition.Config `json:"condition" yaml:"condition"`
-	PeriodMS  int              `json:"period_ms" yaml:"period_ms"`
+	Period    string           `json:"period" yaml:"period"`
 }
 
 // NewBatchConfig returns a BatchConfig with default values.
@@ -95,9 +101,10 @@ func NewBatchConfig() BatchConfig {
 	cond.Type = "static"
 	cond.Static = false
 	return BatchConfig{
-		ByteSize:  10000,
+		ByteSize:  0,
+		Count:     0,
 		Condition: cond,
-		PeriodMS:  0,
+		Period:    "",
 	}
 }
 
@@ -116,7 +123,8 @@ type Batch struct {
 	log   log.Modular
 	stats metrics.Type
 
-	n         int
+	byteSize  int
+	count     int
 	period    time.Duration
 	cond      condition.Type
 	sizeTally int
@@ -126,8 +134,9 @@ type Batch struct {
 
 	mCount       metrics.StatCounter
 	mSent        metrics.StatCounter
-	mSentParts   metrics.StatCounter
+	mBatchSent   metrics.StatCounter
 	mSizeBatch   metrics.StatCounter
+	mCountBatch  metrics.StatCounter
 	mPeriodBatch metrics.StatCounter
 	mCondBatch   metrics.StatCounter
 	mDropped     metrics.StatCounter
@@ -137,27 +146,40 @@ type Batch struct {
 func NewBatch(
 	conf Config, mgr types.Manager, log log.Modular, stats metrics.Type,
 ) (Type, error) {
-	logger := log.NewModule(".processor.batch")
-	cond, err := condition.New(conf.Batch.Condition, mgr, logger, metrics.Namespaced(stats, "processor.batch"))
+	cond, err := condition.New(conf.Batch.Condition, mgr, log.NewModule(".condition"), metrics.Namespaced(stats, "condition"))
 	if err != nil {
 		return nil, err
 	}
+	if conf.Batch.ByteSize <= 0 &&
+		conf.Batch.Count <= 0 &&
+		len(conf.Batch.Period) <= 0 {
+		log.Warnln("Batch processor configured without a count, byte_size or" +
+			" period cap. It's possible that this batch will never resolve.")
+	}
+	var period time.Duration
+	if len(conf.Batch.Period) > 0 {
+		if period, err = time.ParseDuration(conf.Batch.Period); err != nil {
+			return nil, fmt.Errorf("failed to parse duration string: %v", err)
+		}
+	}
 	return &Batch{
-		log:    logger,
-		stats:  stats,
-		n:      conf.Batch.ByteSize,
-		period: time.Duration(conf.Batch.PeriodMS) * time.Millisecond,
-		cond:   cond,
+		log:      log,
+		stats:    stats,
+		byteSize: conf.Batch.ByteSize,
+		count:    conf.Batch.Count,
+		period:   period,
+		cond:     cond,
 
 		lastBatch: time.Now(),
 
-		mCount:       stats.GetCounter("processor.batch.count"),
-		mSizeBatch:   stats.GetCounter("processor.batch.on_size"),
-		mPeriodBatch: stats.GetCounter("processor.batch.on_period"),
-		mCondBatch:   stats.GetCounter("processor.batch.on_condition"),
-		mSent:        stats.GetCounter("processor.batch.sent"),
-		mSentParts:   stats.GetCounter("processor.batch.parts.sent"),
-		mDropped:     stats.GetCounter("processor.batch.dropped"),
+		mCount:       stats.GetCounter("count"),
+		mSizeBatch:   stats.GetCounter("on_size"),
+		mCountBatch:  stats.GetCounter("on_count"),
+		mPeriodBatch: stats.GetCounter("on_period"),
+		mCondBatch:   stats.GetCounter("on_condition"),
+		mSent:        stats.GetCounter("sent"),
+		mBatchSent:   stats.GetCounter("batch.sent"),
+		mDropped:     stats.GetCounter("dropped"),
 	}, nil
 }
 
@@ -176,7 +198,12 @@ func (c *Batch) ProcessMessage(msg types.Message) ([]types.Message, types.Respon
 	})
 
 	batch := false
-	if !batch && c.sizeTally >= c.n {
+	if !batch && c.count > 0 && len(c.parts) >= c.count {
+		batch = true
+		c.mCountBatch.Incr(1)
+		c.log.Traceln("Batching based on count")
+	}
+	if !batch && c.byteSize > 0 && c.sizeTally >= c.byteSize {
 		batch = true
 		c.mSizeBatch.Incr(1)
 		c.log.Traceln("Batching based on byte_size")
@@ -184,7 +211,7 @@ func (c *Batch) ProcessMessage(msg types.Message) ([]types.Message, types.Respon
 	if !batch && c.period > 0 && time.Since(c.lastBatch) > c.period {
 		batch = true
 		c.mPeriodBatch.Incr(1)
-		c.log.Traceln("Batching based on period_ms")
+		c.log.Traceln("Batching based on period")
 	}
 	if !batch && c.cond.Check(msg) {
 		batch = true
@@ -201,8 +228,8 @@ func (c *Batch) ProcessMessage(msg types.Message) ([]types.Message, types.Respon
 		c.sizeTally = 0
 		c.lastBatch = time.Now()
 
-		c.mSentParts.Incr(int64(newMsg.Len()))
-		c.mSent.Incr(1)
+		c.mSent.Incr(int64(newMsg.Len()))
+		c.mBatchSent.Incr(1)
 		msgs := [1]types.Message{newMsg}
 		return msgs[:], nil
 	}
@@ -210,6 +237,15 @@ func (c *Batch) ProcessMessage(msg types.Message) ([]types.Message, types.Respon
 	c.log.Traceln("Added message to pending batch")
 	c.mDropped.Incr(1)
 	return nil, response.NewUnack()
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (c *Batch) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (c *Batch) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

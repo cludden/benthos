@@ -23,9 +23,7 @@ package manager
 import (
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
-	"path"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -41,12 +39,12 @@ import (
 
 // StreamStatus tracks a stream along with information regarding its internals.
 type StreamStatus struct {
+	stoppedAfter int64
 	config       stream.Config
 	strm         *stream.Type
 	logger       log.Modular
 	metrics      *metrics.Local
 	createdAt    time.Time
-	stoppedAfter int64
 }
 
 // NewStreamStatus creates a new StreamStatus.
@@ -101,60 +99,9 @@ func (s *StreamStatus) setClosed() {
 
 //------------------------------------------------------------------------------
 
-type nsMgr struct {
-	ns  string
-	mgr types.Manager
-}
-
-func namespacedMgr(ns string, mgr types.Manager) *nsMgr {
-	return &nsMgr{
-		ns:  "/" + ns,
-		mgr: mgr,
-	}
-}
-
-// RegisterEndpoint registers a server wide HTTP endpoint.
-func (n *nsMgr) RegisterEndpoint(p, desc string, h http.HandlerFunc) {
-	n.mgr.RegisterEndpoint(path.Join(n.ns, p), desc, h)
-}
-
-// GetCache attempts to find a service wide cache by its name.
-func (n *nsMgr) GetCache(name string) (types.Cache, error) {
-	return n.mgr.GetCache(name)
-}
-
-// GetCondition attempts to find a service wide condition by its name.
-func (n *nsMgr) GetCondition(name string) (types.Condition, error) {
-	return n.mgr.GetCondition(name)
-}
-
-// GetPipe returns a named pipe transaction channel.
-func (n *nsMgr) GetPipe(name string) (<-chan types.Transaction, error) {
-	// Pipes are always absolute.
-	return n.mgr.GetPipe(name)
-}
-
-// SetPipe sets a named pipe.
-func (n *nsMgr) SetPipe(name string, t <-chan types.Transaction) {
-	// Pipes are always absolute.
-	n.mgr.SetPipe(name, t)
-}
-
-// UnsetPipe unsets a named pipe.
-func (n *nsMgr) UnsetPipe(name string, t <-chan types.Transaction) {
-	// Pipes are always absolute.
-	n.mgr.UnsetPipe(name, t)
-}
-
-//------------------------------------------------------------------------------
-
 // StreamProcConstructorFunc is a closure type that constructs a processor type
 // for new streams, where the id of the stream is provided as an argument.
 type StreamProcConstructorFunc func(streamID string) (types.Processor, error)
-
-// StreamPipeConstructorFunc is a closure type that constructs a pipeline type
-// for new streams, where the id of the stream is provided as an argument.
-type StreamPipeConstructorFunc func(streamID string) (types.Pipeline, error)
 
 //------------------------------------------------------------------------------
 
@@ -169,9 +116,7 @@ type Type struct {
 	logger     log.Modular
 	apiTimeout time.Duration
 
-	inputPipeCtors    []StreamPipeConstructorFunc
 	pipelineProcCtors []StreamProcConstructorFunc
-	outputPipeCtors   []StreamPipeConstructorFunc
 
 	lock sync.Mutex
 }
@@ -225,30 +170,12 @@ func OptSetAPITimeout(tout time.Duration) func(*Type) {
 	}
 }
 
-// OptAddInputPipelines adds pipeline constructors that will be called for every
-// new stream and attached to the input component. The constructor is given the
-// name of the stream as an argument.
-func OptAddInputPipelines(pipes ...StreamPipeConstructorFunc) func(*Type) {
-	return func(t *Type) {
-		t.inputPipeCtors = append(t.inputPipeCtors, pipes...)
-	}
-}
-
 // OptAddProcessors adds processor constructors that will be called for every
 // new stream and attached to the processor pipelines. The constructor is given
 // the name of the stream as an argument.
 func OptAddProcessors(procs ...StreamProcConstructorFunc) func(*Type) {
 	return func(t *Type) {
 		t.pipelineProcCtors = append(t.pipelineProcCtors, procs...)
-	}
-}
-
-// OptAddOutputPipelines adds pipeline constructors that will be called for
-// every new stream and attached to the output component. The constructor is
-// given the name of the stream as an argument.
-func OptAddOutputPipelines(pipes ...StreamPipeConstructorFunc) func(*Type) {
-	return func(t *Type) {
-		t.outputPipeCtors = append(t.outputPipeCtors, pipes...)
 	}
 }
 
@@ -276,27 +203,10 @@ func (m *Type) Create(id string, conf stream.Config) error {
 		return ErrStreamExists
 	}
 
-	var inputPipeCtors []types.PipelineConstructorFunc
 	var procCtors []types.ProcessorConstructorFunc
-	var outputPipeCtors []types.PipelineConstructorFunc
-
-	for _, ctor := range m.inputPipeCtors {
-		func(c StreamPipeConstructorFunc) {
-			inputPipeCtors = append(inputPipeCtors, func() (types.Pipeline, error) {
-				return c(id)
-			})
-		}(ctor)
-	}
 	for _, ctor := range m.pipelineProcCtors {
 		func(c StreamProcConstructorFunc) {
 			procCtors = append(procCtors, func() (types.Processor, error) {
-				return c(id)
-			})
-		}(ctor)
-	}
-	for _, ctor := range m.outputPipeCtors {
-		func(c StreamPipeConstructorFunc) {
-			outputPipeCtors = append(outputPipeCtors, func() (types.Pipeline, error) {
 				return c(id)
 			})
 		}(ctor)
@@ -308,9 +218,7 @@ func (m *Type) Create(id string, conf stream.Config) error {
 	var wrapper *StreamStatus
 	strm, err := stream.New(
 		conf,
-		stream.OptAddInputPipelines(inputPipeCtors...),
 		stream.OptAddProcessors(procCtors...),
-		stream.OptAddOutputPipelines(outputPipeCtors...),
 		stream.OptSetLogger(strmLogger),
 		stream.OptSetStats(metrics.Combine(metrics.Namespaced(m.stats, id), strmFlatMetrics)),
 		stream.OptSetManager(namespacedMgr(id, m.manager)),

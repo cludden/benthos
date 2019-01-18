@@ -1,10 +1,11 @@
 language: go
 go:
-  - stable
-#sudo: required
-#services:
-#  - docker
+  - "1.11.x"
+cache:
+  directories:
+    - $GOPATH/pkg/mod
+env:
+  - GO111MODULE=on
 script:
-  - make deps
   - make
   - make test

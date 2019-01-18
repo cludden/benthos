@@ -29,7 +29,6 @@ import (
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
 	"github.com/Jeffail/benthos/lib/output"
-	"github.com/Jeffail/benthos/lib/pipeline"
 	"github.com/Jeffail/benthos/lib/stream"
 	"github.com/Jeffail/benthos/lib/types"
 )
@@ -50,6 +49,17 @@ func (m *mockProc) ProcessMessage(msg types.Message) ([]types.Message, types.Res
 	return []types.Message{msg}, nil
 }
 
+// CloseAsync shuts down the processor and stops processing requests.
+func (m mockProc) CloseAsync() {
+	// Do nothing as our processor doesn't require resource cleanup.
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (m mockProc) WaitForClose(timeout time.Duration) error {
+	// Do nothing as our processor doesn't require resource cleanup.
+	return nil
+}
+
 func TestTypeProcsAndPipes(t *testing.T) {
 	var mockProcs []*mockProc
 	for i := 0; i < 6; i++ {
@@ -65,18 +75,17 @@ func TestTypeProcsAndPipes(t *testing.T) {
 		OptSetLogger(logger),
 		OptSetStats(stats),
 		OptSetManager(types.DudMgr{}),
-		OptAddInputPipelines(func(id string) (types.Pipeline, error) {
-			if id != "foo" {
-				t.Errorf("Wrong id: %v != %v", id, "foo")
-			}
-			return pipeline.NewProcessor(logger, stats, mockProcs[0]), nil
-		}, func(id string) (types.Pipeline, error) {
-			if id != "foo" {
-				t.Errorf("Wrong id: %v != %v", id, "foo")
-			}
-			return pipeline.NewProcessor(logger, stats, mockProcs[1]), nil
-		}),
 		OptAddProcessors(func(id string) (types.Processor, error) {
+			if id != "foo" {
+				t.Errorf("Wrong id: %v != %v", id, "foo")
+			}
+			return mockProcs[0], nil
+		}, func(id string) (types.Processor, error) {
+			if id != "foo" {
+				t.Errorf("Wrong id: %v != %v", id, "foo")
+			}
+			return mockProcs[1], nil
+		}, func(id string) (types.Processor, error) {
 			if id != "foo" {
 				t.Errorf("Wrong id: %v != %v", id, "foo")
 			}
@@ -86,17 +95,16 @@ func TestTypeProcsAndPipes(t *testing.T) {
 				t.Errorf("Wrong id: %v != %v", id, "foo")
 			}
 			return mockProcs[3], nil
-		}),
-		OptAddOutputPipelines(func(id string) (types.Pipeline, error) {
+		}, func(id string) (types.Processor, error) {
 			if id != "foo" {
 				t.Errorf("Wrong id: %v != %v", id, "foo")
 			}
-			return pipeline.NewProcessor(logger, stats, mockProcs[4]), nil
-		}, func(id string) (types.Pipeline, error) {
+			return mockProcs[4], nil
+		}, func(id string) (types.Processor, error) {
 			if id != "foo" {
 				t.Errorf("Wrong id: %v != %v", id, "foo")
 			}
-			return pipeline.NewProcessor(logger, stats, mockProcs[5]), nil
+			return mockProcs[5], nil
 		}),
 	)
 

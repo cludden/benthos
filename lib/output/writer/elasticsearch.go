@@ -28,35 +28,65 @@ import (
 	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
+	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
 	"github.com/Jeffail/benthos/lib/types"
+	sess "github.com/Jeffail/benthos/lib/util/aws/session"
 	"github.com/Jeffail/benthos/lib/util/http/auth"
+	"github.com/Jeffail/benthos/lib/util/retries"
 	"github.com/Jeffail/benthos/lib/util/text"
+	"github.com/cenkalti/backoff"
 	"github.com/olivere/elastic"
+	aws "github.com/olivere/elastic/aws/v4"
 )
+
+//------------------------------------------------------------------------------
+
+// OptionalAWSConfig contains config fields for AWS authentication with an
+// enable flag.
+type OptionalAWSConfig struct {
+	Enabled     bool `json:"enabled" yaml:"enabled"`
+	sess.Config `json:",inline" yaml:",inline"`
+}
 
 //------------------------------------------------------------------------------
 
 // ElasticsearchConfig contains configuration fields for the Elasticsearch
 // output type.
 type ElasticsearchConfig struct {
-	URLs      []string             `json:"urls" yaml:"urls"`
-	ID        string               `json:"id" yaml:"id"`
-	Index     string               `json:"index" yaml:"index"`
-	Type      string               `json:"type" yaml:"type"`
-	TimeoutMS int                  `json:"timeout_ms" yaml:"timeout_ms"`
-	Auth      auth.BasicAuthConfig `json:"basic_auth" yaml:"basic_auth"`
+	URLs           []string             `json:"urls" yaml:"urls"`
+	Sniff          bool                 `json:"sniff" yaml:"sniff"`
+	ID             string               `json:"id" yaml:"id"`
+	Index          string               `json:"index" yaml:"index"`
+	Pipeline       string               `json:"pipeline" yaml:"pipeline"`
+	Type           string               `json:"type" yaml:"type"`
+	Timeout        string               `json:"timeout" yaml:"timeout"`
+	Auth           auth.BasicAuthConfig `json:"basic_auth" yaml:"basic_auth"`
+	AWS            OptionalAWSConfig    `json:"aws" yaml:"aws"`
+	retries.Config `json:",inline" yaml:",inline"`
 }
 
 // NewElasticsearchConfig creates a new ElasticsearchConfig with default values.
 func NewElasticsearchConfig() ElasticsearchConfig {
+	rConf := retries.NewConfig()
+	rConf.Backoff.InitialInterval = "1s"
+	rConf.Backoff.MaxInterval = "5s"
+	rConf.Backoff.MaxElapsedTime = "30s"
+
 	return ElasticsearchConfig{
-		URLs:      []string{"http://localhost:9200"},
-		ID:        "${!count:elastic_ids}-${!timestamp_unix}",
-		Index:     "benthos_index",
-		Type:      "doc",
-		TimeoutMS: 5000,
-		Auth:      auth.NewBasicAuthConfig(),
+		URLs:     []string{"http://localhost:9200"},
+		Sniff:    true,
+		ID:       "${!count:elastic_ids}-${!timestamp_unix}",
+		Index:    "benthos_index",
+		Pipeline: "",
+		Type:     "doc",
+		Timeout:  "5s",
+		Auth:     auth.NewBasicAuthConfig(),
+		AWS: OptionalAWSConfig{
+			Enabled: false,
+			Config:  sess.NewConfig(),
+		},
+		Config: rConf,
 	}
 }
 
@@ -67,12 +97,19 @@ type Elasticsearch struct {
 	log   log.Modular
 	stats metrics.Type
 
-	urls []string
-	conf ElasticsearchConfig
+	urls  []string
+	sniff bool
+	conf  ElasticsearchConfig
+
+	backoff backoff.BackOff
+	timeout time.Duration
 
 	idStr             *text.InterpolatedString
 	indexStr          *text.InterpolatedString
+	pipelineStr       *text.InterpolatedString
 	interpolatedIndex bool
+
+	eJSONErr metrics.StatCounter
 
 	client *elastic.Client
 }
@@ -80,12 +117,15 @@ type Elasticsearch struct {
 // NewElasticsearch creates a new Elasticsearch writer type.
 func NewElasticsearch(conf ElasticsearchConfig, log log.Modular, stats metrics.Type) (*Elasticsearch, error) {
 	e := Elasticsearch{
-		log:               log.NewModule(".output.elasticsearch"),
+		log:               log,
 		stats:             stats,
 		conf:              conf,
+		sniff:             conf.Sniff,
 		idStr:             text.NewInterpolatedString(conf.ID),
 		indexStr:          text.NewInterpolatedString(conf.Index),
+		pipelineStr:       text.NewInterpolatedString(conf.Pipeline),
 		interpolatedIndex: text.ContainsFunctionVariables([]byte(conf.Index)),
+		eJSONErr:          stats.GetCounter("error.json"),
 	}
 
 	for _, u := range conf.URLs {
@@ -94,6 +134,18 @@ func NewElasticsearch(conf ElasticsearchConfig, log log.Modular, stats metrics.T
 				e.urls = append(e.urls, splitURL)
 			}
 		}
+	}
+
+	if tout := conf.Timeout; len(tout) > 0 {
+		var err error
+		if e.timeout, err = time.ParseDuration(tout); err != nil {
+			return nil, fmt.Errorf("failed to parse timeout string: %v", err)
+		}
+	}
+
+	var err error
+	if e.backoff, err = conf.Config.Get(); err != nil {
+		return nil, err
 	}
 
 	return &e, nil
@@ -110,14 +162,23 @@ func (e *Elasticsearch) Connect() error {
 	opts := []elastic.ClientOptionFunc{
 		elastic.SetURL(e.urls...),
 		elastic.SetHttpClient(&http.Client{
-			Timeout: time.Duration(e.conf.TimeoutMS) * time.Millisecond,
+			Timeout: e.timeout,
 		}),
+		elastic.SetSniff(e.sniff),
 	}
 
 	if e.conf.Auth.Enabled {
 		opts = append(opts, elastic.SetBasicAuth(
 			e.conf.Auth.Username, e.conf.Auth.Password,
 		))
+	}
+	if e.conf.AWS.Enabled {
+		tsess, err := e.conf.AWS.GetSession()
+		if err != nil {
+			return err
+		}
+		signingClient := aws.NewV4SigningClient(tsess.Config.Credentials, e.conf.AWS.Region)
+		opts = append(opts, elastic.SetHttpClient(signingClient))
 	}
 
 	var err error
@@ -139,6 +200,13 @@ func (e *Elasticsearch) Connect() error {
 	return err
 }
 
+func shouldRetry(s int) bool {
+	if s >= 500 && s <= 599 {
+		return true
+	}
+	return false
+}
+
 // Write will attempt to write a message to Elasticsearch, wait for
 // acknowledgement, and returns an error if applicable.
 func (e *Elasticsearch) Write(msg types.Message) error {
@@ -146,16 +214,72 @@ func (e *Elasticsearch) Write(msg types.Message) error {
 		return types.ErrNotConnected
 	}
 
-	return msg.Iter(func(i int, part types.Part) error {
+	if msg.Len() == 1 {
+		index := e.indexStr.Get(msg)
 		_, err := e.client.Index().
-			Index(e.indexStr.Get(msg)).
+			Index(index).
+			Pipeline(e.pipelineStr.Get(msg)).
 			Type(e.conf.Type).
 			Id(e.idStr.Get(msg)).
-			BodyString(string(part.Get())).
+			BodyString(string(msg.Get(0).Get())).
 			Do(context.Background())
-
+		if err == nil {
+			// Flush to make sure the document got written.
+			_, err = e.client.Flush().Index(index).Do(context.Background())
+		}
 		return err
+	}
+
+	e.backoff.Reset()
+
+	b := e.client.Bulk()
+	docs := []interface{}{}
+	msg.Iter(func(i int, part types.Part) error {
+		jObj, ierr := part.JSON()
+		if ierr != nil {
+			e.eJSONErr.Incr(1)
+			e.log.Errorf("Failed to marshal message into JSON document: %v\n", ierr)
+			return nil
+		}
+		docs = append(docs, jObj)
+		b.Add(
+			elastic.NewBulkIndexRequest().
+				Index(e.indexStr.Get(message.Lock(msg, i))).
+				Pipeline(e.pipelineStr.Get(message.Lock(msg, i))).
+				Type(e.conf.Type).
+				Id(e.idStr.Get(message.Lock(msg, i))).
+				Doc(jObj),
+		)
+		return nil
 	})
+
+	for b.NumberOfActions() != 0 {
+		wait := e.backoff.NextBackOff()
+
+		result, err := b.Do(context.Background())
+		if err != nil {
+			return err
+		}
+
+		failed := result.Failed()
+		if len(failed) == 0 {
+			return nil
+		}
+
+		for i := 0; i < len(failed); i++ {
+			if !shouldRetry(failed[i].Status) {
+				e.log.Errorf("elasticsearch message rejected with code [%s]: %v\n", failed[i].Status, failed[i].Error.Reason)
+				return fmt.Errorf("failed to send %v parts from message: %v", len(failed), failed[0].Error.Reason)
+			}
+			e.log.Errorf("elasticsearch message failed with code [%s]: %v\n", failed[i].Status, failed[i].Error.Reason)
+		}
+		if wait == backoff.Stop {
+			return fmt.Errorf("failed to send %v parts from message: %v", len(failed), failed[0].Error.Reason)
+		}
+		time.Sleep(wait)
+	}
+
+	return nil
 }
 
 // CloseAsync shuts down the Elasticsearch writer and stops processing messages.

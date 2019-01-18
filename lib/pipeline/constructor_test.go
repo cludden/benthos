@@ -62,9 +62,10 @@ func TestSanitise(t *testing.T) {
 	exp = `{` +
 		`"processors":[` +
 		`{` +
-		`"type":"combine",` +
-		`"combine":{` +
-		`"parts":2` +
+		`"type":"log",` +
+		`"log":{` +
+		`"level":"INFO",` +
+		`"message":""` +
 		`}` +
 		`},` +
 		`{` +
@@ -79,7 +80,7 @@ func TestSanitise(t *testing.T) {
 		`}`
 
 	proc := processor.NewConfig()
-	proc.Type = "combine"
+	proc.Type = "log"
 	conf.Processors = append(conf.Processors, proc)
 
 	proc = processor.NewConfig()
@@ -157,11 +158,13 @@ func TestProcCtor(t *testing.T) {
 		t.Errorf("Wrong contents: %s != %s", act, exp)
 	}
 
-	select {
-	case <-time.After(time.Second):
-		t.Fatal("timed out")
-	case tran.ResponseChan <- response.NewAck():
-	}
+	go func() {
+		select {
+		case <-time.After(time.Second):
+			t.Fatal("timed out")
+		case tran.ResponseChan <- response.NewAck():
+		}
+	}()
 
 	select {
 	case <-time.After(time.Second):

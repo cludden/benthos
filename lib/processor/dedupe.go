@@ -24,6 +24,7 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/OneOfOne/xxhash"
 
@@ -40,15 +41,19 @@ func init() {
 	Constructors[TypeDedupe] = TypeSpec{
 		constructor: NewDedupe,
 		description: `
-Dedupes messages by caching selected (and optionally hashed) message parts,
-dropping messages that are already cached. The hash type can be chosen from:
-none or xxhash (more will come soon).
+Dedupes message batches by caching selected (and optionally hashed) messages,
+dropping batches that are already cached. The hash type can be chosen from:
+none or xxhash.
+
+This processor acts across an entire batch, in order to deduplicate individual
+messages within a batch use this processor with the
+` + "[`process_batch`](#process_batch)" + ` processor.
 
 Optionally, the ` + "`key`" + ` field can be populated in order to hash on a
-function interpolated string rather than the full contents of message parts.
-This allows you to deduplicate based on dynamic fields within a message, such as
-its metadata, JSON fields, etc. A full list of interpolation functions can be
-found [here](../config_interpolation.md#functions).
+function interpolated string rather than the full contents of messages. This
+allows you to deduplicate based on dynamic fields within a message, such as its
+metadata, JSON fields, etc. A full list of interpolation functions can be found
+[here](../config_interpolation.md#functions).
 
 For example, the following config would deduplicate based on the concatenated
 values of the metadata field ` + "`kafka_key`" + ` and the value of the JSON
@@ -61,7 +66,24 @@ dedupe:
 ` + "```" + `
 
 Caches should be configured as a resource, for more information check out the
-[documentation here](../caches).`,
+[documentation here](../caches).
+
+### Delivery Guarantees
+
+Performing a deduplication step on a payload in transit voids any at-least-once
+guarantees that the payload previously had, as it's impossible to fully
+guarantee that the message is propagated to the next destination. If the message
+is reprocessed due to output failure or a service restart then it will be lost
+due to failing the deduplication step on the second attempt.
+
+You can avoid reprocessing payloads on failed sends by using either the
+` + "[`retry`](../outputs/README.md#retry)" + ` output type or the
+` + "[`broker`](../outputs/README.md#broker)" + ` output type using the 'try'
+pattern. However, if the service is restarted between retry attempts then the
+message can still be lost.
+
+It is worth strongly considering the delivery guarantees that your pipeline is
+meant to provide when using this processor.`,
 	}
 }
 
@@ -144,12 +166,12 @@ type Dedupe struct {
 	hasherFunc hasherFunc
 
 	mCount     metrics.StatCounter
-	mErrJSON   metrics.StatCounter
-	mDropped   metrics.StatCounter
 	mErrHash   metrics.StatCounter
 	mErrCache  metrics.StatCounter
+	mErr       metrics.StatCounter
+	mDropped   metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewDedupe returns a Dedupe processor.
@@ -171,7 +193,7 @@ func NewDedupe(
 
 	return &Dedupe{
 		conf:  conf,
-		log:   log.NewModule(".processor.dedupe"),
+		log:   log,
 		stats: stats,
 
 		keyBytes:       keyBytes,
@@ -180,13 +202,13 @@ func NewDedupe(
 		cache:      c,
 		hasherFunc: hFunc,
 
-		mCount:     stats.GetCounter("processor.dedupe.count"),
-		mErrJSON:   stats.GetCounter("processor.dedupe.error.json_parse"),
-		mDropped:   stats.GetCounter("processor.dedupe.dropped"),
-		mErrHash:   stats.GetCounter("processor.dedupe.error.hash"),
-		mErrCache:  stats.GetCounter("processor.dedupe.error.cache"),
-		mSent:      stats.GetCounter("processor.dedupe.sent"),
-		mSentParts: stats.GetCounter("processor.dedupe.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErrHash:   stats.GetCounter("error.hash"),
+		mErrCache:  stats.GetCounter("error.cache"),
+		mErr:       stats.GetCounter("error"),
+		mDropped:   stats.GetCounter("dropped"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -213,6 +235,7 @@ func (d *Dedupe) ProcessMessage(msg types.Message) ([]types.Message, types.Respo
 			if partBytes := msg.Get(index).Get(); partBytes != nil {
 				if _, err := hasher.Write(msg.Get(index).Get()); nil != err {
 					d.mErrHash.Incr(1)
+					d.mErr.Incr(1)
 					d.mDropped.Incr(1)
 					d.log.Errorf("Hash error: %v\n", err)
 				} else {
@@ -230,6 +253,7 @@ func (d *Dedupe) ProcessMessage(msg types.Message) ([]types.Message, types.Respo
 	} else if err := d.cache.Add(string(hasher.Bytes()), []byte{'t'}); err != nil {
 		if err != types.ErrKeyAlreadyExists {
 			d.mErrCache.Incr(1)
+			d.mErr.Incr(1)
 			d.log.Errorf("Cache error: %v\n", err)
 			if d.conf.Dedupe.DropOnCacheErr {
 				d.mDropped.Incr(1)
@@ -241,10 +265,19 @@ func (d *Dedupe) ProcessMessage(msg types.Message) ([]types.Message, types.Respo
 		}
 	}
 
-	d.mSent.Incr(1)
-	d.mSentParts.Incr(int64(msg.Len()))
+	d.mBatchSent.Incr(1)
+	d.mSent.Incr(int64(msg.Len()))
 	msgs := [1]types.Message{msg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (d *Dedupe) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (d *Dedupe) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

@@ -42,7 +42,7 @@ func TestPoolBasic(t *testing.T) {
 		mockProc.dropChan <- true
 	}()
 
-	constr := func() (types.Pipeline, error) {
+	constr := func(i *int) (types.Pipeline, error) {
 		return NewProcessor(
 			log.New(os.Stdout, log.Config{LogLevel: "NONE"}),
 			metrics.DudType{},
@@ -156,7 +156,7 @@ func TestPoolBasic(t *testing.T) {
 func TestPoolMultiMsgs(t *testing.T) {
 	mockProc := &mockMultiMsgProcessor{N: 3}
 
-	constr := func() (types.Pipeline, error) {
+	constr := func(i *int) (types.Pipeline, error) {
 		return NewProcessor(
 			log.New(os.Stdout, log.Config{LogLevel: "NONE"}),
 			metrics.DudType{},
@@ -290,12 +290,14 @@ func TestPoolMultiThreads(t *testing.T) {
 			t.Fatal("Timed out")
 		}
 
-		// Respond with no error
-		select {
-		case procT.ResponseChan <- response.NewAck():
-		case <-time.After(time.Second * 5):
-			t.Fatal("Timed out")
-		}
+		go func(tran types.Transaction) {
+			// Respond with no error
+			select {
+			case tran.ResponseChan <- response.NewAck():
+			case <-time.After(time.Second * 5):
+				t.Fatal("Timed out")
+			}
+		}(procT)
 	}
 	for j := 0; j < conf.Threads; j++ {
 		// Receive response

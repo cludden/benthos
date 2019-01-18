@@ -44,6 +44,10 @@ func (m *mockInput) TransactionChan() <-chan types.Transaction {
 	return m.ts
 }
 
+func (m *mockInput) Connected() bool {
+	return true
+}
+
 func (m *mockInput) CloseAsync() {
 	close(m.ts)
 }
@@ -84,7 +88,8 @@ func TestBasicWrapPipeline(t *testing.T) {
 		ts: make(chan types.Transaction),
 	}
 
-	newInput, err := WrapWithPipeline(mockIn, func() (types.Pipeline, error) {
+	procs := 0
+	newInput, err := WrapWithPipeline(&procs, mockIn, func(i *int) (types.Pipeline, error) {
 		return nil, errors.New("nope")
 	})
 
@@ -92,7 +97,7 @@ func TestBasicWrapPipeline(t *testing.T) {
 		t.Error("Expected error from back constructor")
 	}
 
-	newInput, err = WrapWithPipeline(mockIn, func() (types.Pipeline, error) {
+	newInput, err = WrapWithPipeline(&procs, mockIn, func(i *int) (types.Pipeline, error) {
 		return mockPi, nil
 	})
 	if err != nil {
@@ -147,16 +152,16 @@ func TestBasicWrapMultiPipelines(t *testing.T) {
 		ts: make(chan types.Transaction),
 	}
 
-	newInput, err := WrapWithPipelines(mockIn, func() (types.Pipeline, error) {
+	newInput, err := WrapWithPipelines(mockIn, func(i *int) (types.Pipeline, error) {
 		return nil, errors.New("nope")
 	})
 	if err == nil {
 		t.Error("Expected error from back constructor")
 	}
 
-	newInput, err = WrapWithPipelines(mockIn, func() (types.Pipeline, error) {
+	newInput, err = WrapWithPipelines(mockIn, func(i *int) (types.Pipeline, error) {
 		return mockPi1, nil
-	}, func() (types.Pipeline, error) {
+	}, func(i *int) (types.Pipeline, error) {
 		return mockPi2, nil
 	})
 	if err != nil {
@@ -214,6 +219,17 @@ func (m mockProc) ProcessMessage(msg types.Message) ([]types.Message, types.Resp
 	return msgs[:], nil
 }
 
+// CloseAsync shuts down the processor and stops processing requests.
+func (m mockProc) CloseAsync() {
+	// Do nothing as our processor doesn't require resource cleanup.
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (m mockProc) WaitForClose(timeout time.Duration) error {
+	// Do nothing as our processor doesn't require resource cleanup.
+	return nil
+}
+
 //------------------------------------------------------------------------------
 
 func TestBasicWrapProcessors(t *testing.T) {
@@ -225,9 +241,9 @@ func TestBasicWrapProcessors(t *testing.T) {
 	pipe1 := pipeline.NewProcessor(l, s, mockProc{value: "foo"})
 	pipe2 := pipeline.NewProcessor(l, s, mockProc{value: "bar"})
 
-	newInput, err := WrapWithPipelines(mockIn, func() (types.Pipeline, error) {
+	newInput, err := WrapWithPipelines(mockIn, func(i *int) (types.Pipeline, error) {
 		return pipe1, nil
-	}, func() (types.Pipeline, error) {
+	}, func(i *int) (types.Pipeline, error) {
 		return pipe2, nil
 	})
 	if err != nil {
@@ -305,13 +321,16 @@ func TestBasicWrapProcessors(t *testing.T) {
 		t.Error("action timed out")
 	}
 
-	// Send error
 	errFailed := errors.New("derp, failed")
-	select {
-	case ts.ResponseChan <- response.NewError(errFailed):
-	case <-time.After(time.Second):
-		t.Error("action timed out")
-	}
+
+	// Send error
+	go func() {
+		select {
+		case ts.ResponseChan <- response.NewError(errFailed):
+		case <-time.After(time.Second):
+			t.Error("action timed out")
+		}
+	}()
 
 	// Receive again
 	select {
@@ -319,31 +338,7 @@ func TestBasicWrapProcessors(t *testing.T) {
 		if !open {
 			t.Error("Channel was closed")
 		}
-		t.Errorf("Unexpected response: %v", res.Error())
-	case ts, open = <-newInput.TransactionChan():
-		if !open {
-			t.Error("channel was closed")
-		} else if exp, act := "baz", string(ts.Payload.Get(0).Get()); exp != act {
-			t.Errorf("Wrong message received: %v != %v", act, exp)
-		}
-	case <-time.After(time.Second):
-		t.Error("action timed out")
-	}
-
-	// Send non-error
-	select {
-	case ts.ResponseChan <- response.NewAck():
-	case <-time.After(time.Second):
-		t.Error("action timed out")
-	}
-
-	// Receive response
-	select {
-	case res, open := <-resChan:
-		if !open {
-			t.Error("Channel was closed")
-		}
-		if res.Error() != nil {
+		if res.Error() != errFailed {
 			t.Error(res.Error())
 		}
 	case <-time.After(time.Second):
@@ -364,7 +359,7 @@ func TestBasicWrapDoubleProcessors(t *testing.T) {
 
 	pipe1 := pipeline.NewProcessor(l, s, mockProc{value: "foo"}, mockProc{value: "bar"})
 
-	newInput, err := WrapWithPipelines(mockIn, func() (types.Pipeline, error) {
+	newInput, err := WrapWithPipelines(mockIn, func(i *int) (types.Pipeline, error) {
 		return pipe1, nil
 	})
 	if err != nil {
@@ -442,13 +437,16 @@ func TestBasicWrapDoubleProcessors(t *testing.T) {
 		t.Error("action timed out")
 	}
 
-	// Send error
 	errFailed := errors.New("derp, failed")
-	select {
-	case ts.ResponseChan <- response.NewError(errFailed):
-	case <-time.After(time.Second):
-		t.Error("action timed out")
-	}
+
+	// Send error
+	go func() {
+		select {
+		case ts.ResponseChan <- response.NewError(errFailed):
+		case <-time.After(time.Second):
+			t.Error("action timed out")
+		}
+	}()
 
 	// Receive again
 	select {
@@ -456,31 +454,7 @@ func TestBasicWrapDoubleProcessors(t *testing.T) {
 		if !open {
 			t.Error("Channel was closed")
 		}
-		t.Errorf("Unexpected response: %v", res.Error())
-	case ts, open = <-newInput.TransactionChan():
-		if !open {
-			t.Error("channel was closed")
-		} else if exp, act := "baz", string(ts.Payload.Get(0).Get()); exp != act {
-			t.Errorf("Wrong message received: %v != %v", act, exp)
-		}
-	case <-time.After(time.Second):
-		t.Error("action timed out")
-	}
-
-	// Send non-error
-	select {
-	case ts.ResponseChan <- response.NewAck():
-	case <-time.After(time.Second):
-		t.Error("action timed out")
-	}
-
-	// Receive response
-	select {
-	case res, open := <-resChan:
-		if !open {
-			t.Error("Channel was closed")
-		}
-		if res.Error() != nil {
+		if res.Error() != errFailed {
 			t.Error(res.Error())
 		}
 	case <-time.After(time.Second):

@@ -22,6 +22,7 @@ package processor
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -35,7 +36,7 @@ func init() {
 	Constructors[TypeJMESPath] = TypeSpec{
 		constructor: NewJMESPath,
 		description: `
-Parses a message part as a JSON blob and attempts to apply a JMESPath expression
+Parses a message as a JSON document and attempts to apply a JMESPath expression
 to it, replacing the contents of the part with the result. Please refer to the
 [JMESPath website](http://jmespath.org/) for information and tutorials regarding
 the syntax of expressions.
@@ -44,11 +45,10 @@ For example, with the following config:
 
 ` + "``` yaml" + `
 jmespath:
-  parts: [ 0 ]
   query: locations[?state == 'WA'].name | sort(@) | {Cities: join(', ', @)}
 ` + "```" + `
 
-If the initial contents of part 0 were:
+If the initial contents of a message were:
 
 ` + "``` json" + `
 {
@@ -61,7 +61,7 @@ If the initial contents of part 0 were:
 }
 ` + "```" + `
 
-Then the resulting contents of part 0 would be:
+Then the resulting contents would be:
 
 ` + "``` json" + `
 {"Cities": "Bellevue, Olympia, Seattle"}
@@ -105,9 +105,9 @@ type JMESPath struct {
 	mErrJSONP  metrics.StatCounter
 	mErrJMES   metrics.StatCounter
 	mErrJSONS  metrics.StatCounter
-	mSucc      metrics.StatCounter
+	mErr       metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewJMESPath returns a JMESPath processor.
@@ -122,16 +122,16 @@ func NewJMESPath(
 		parts: conf.JMESPath.Parts,
 		query: query,
 		conf:  conf,
-		log:   log.NewModule(".processor.jmespath"),
+		log:   log,
 		stats: stats,
 
-		mCount:     stats.GetCounter("processor.jmespath.count"),
-		mErrJSONP:  stats.GetCounter("processor.jmespath.error.json_parse"),
-		mErrJMES:   stats.GetCounter("processor.jmespath.error.jmespath_search"),
-		mErrJSONS:  stats.GetCounter("processor.jmespath.error.json_set"),
-		mSucc:      stats.GetCounter("processor.jmespath.success"),
-		mSent:      stats.GetCounter("processor.jmespath.sent"),
-		mSentParts: stats.GetCounter("processor.jmespath.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErrJSONP:  stats.GetCounter("error.json_parse"),
+		mErrJMES:   stats.GetCounter("error.jmespath_search"),
+		mErrJSONS:  stats.GetCounter("error.json_set"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}
 	return j, nil
 }
@@ -151,45 +151,59 @@ func safeSearch(part interface{}, j *jmespath.JMESPath) (res interface{}, err er
 // resulting messages or a response to be sent back to the message source.
 func (p *JMESPath) ProcessMessage(msg types.Message) ([]types.Message, types.Response) {
 	p.mCount.Incr(1)
-
 	newMsg := msg.Copy()
 
-	targetParts := p.parts
-	if len(targetParts) == 0 {
-		targetParts = make([]int, newMsg.Len())
-		for i := range targetParts {
-			targetParts[i] = i
-		}
-	}
-
-	for _, index := range targetParts {
+	proc := func(index int) {
 		jsonPart, err := newMsg.Get(index).JSON()
 		if err != nil {
 			p.mErrJSONP.Incr(1)
+			p.mErr.Incr(1)
 			p.log.Debugf("Failed to parse part into json: %v\n", err)
-			continue
+			FlagFail(newMsg.Get(index))
+			return
 		}
 
 		var result interface{}
 		if result, err = safeSearch(jsonPart, p.query); err != nil {
 			p.mErrJMES.Incr(1)
+			p.mErr.Incr(1)
 			p.log.Debugf("Failed to search json: %v\n", err)
-			continue
+			FlagFail(newMsg.Get(index))
+			return
 		}
 
 		if err = newMsg.Get(index).SetJSON(result); err != nil {
 			p.mErrJSONS.Incr(1)
+			p.mErr.Incr(1)
 			p.log.Debugf("Failed to convert jmespath result into part: %v\n", err)
-		} else {
-			p.mSucc.Incr(1)
+			FlagFail(newMsg.Get(index))
+		}
+	}
+
+	if len(p.parts) == 0 {
+		for i := 0; i < msg.Len(); i++ {
+			proc(i)
+		}
+	} else {
+		for _, i := range p.parts {
+			proc(i)
 		}
 	}
 
 	msgs := [1]types.Message{newMsg}
 
-	p.mSent.Incr(1)
-	p.mSentParts.Incr(int64(newMsg.Len()))
+	p.mBatchSent.Incr(1)
+	p.mSent.Incr(int64(newMsg.Len()))
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (p *JMESPath) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (p *JMESPath) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

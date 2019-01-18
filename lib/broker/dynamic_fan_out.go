@@ -91,7 +91,7 @@ func NewDynamicFanOut(
 	d := &DynamicFanOut{
 		running:       1,
 		stats:         stats,
-		log:           logger.NewModule(".broker.dynamic_fan_out"),
+		log:           logger,
 		onAdd:         func(l string) {},
 		onRemove:      func(l string) {},
 		transactions:  nil,
@@ -105,7 +105,7 @@ func NewDynamicFanOut(
 	}
 	d.throt = throttle.New(throttle.OptCloseChan(d.closeChan))
 
-	mAddErr := d.stats.GetCounter("broker.dynamic_fan_out.output.add.error")
+	mAddErr := d.stats.GetCounter("output.add.error")
 	for k, v := range outputs {
 		if err := d.addOutput(k, v); err != nil {
 			d.log.Errorf("Failed to initialise dynamic output '%v': %v\n", k, err)
@@ -232,14 +232,14 @@ func (d *DynamicFanOut) loop() {
 	}()
 
 	var (
-		mCount      = d.stats.GetCounter("broker.dynamic_fan_out.output.count")
-		mRemoveErr  = d.stats.GetCounter("broker.dynamic_fan_out.output.remove.error")
-		mRemoveSucc = d.stats.GetCounter("broker.dynamic_fan_out.output.remove.success")
-		mAddErr     = d.stats.GetCounter("broker.dynamic_fan_out.output.add.error")
-		mAddSucc    = d.stats.GetCounter("broker.dynamic_fan_out.output.add.success")
-		mMsgsRcd    = d.stats.GetCounter("broker.dynamic_fan_out.messages.received")
-		mOutputErr  = d.stats.GetCounter("broker.dynamic_fan_out.output.error")
-		mMsgsSnt    = d.stats.GetCounter("broker.dynamic_fan_out.messages.sent")
+		mCount      = d.stats.GetCounter("count")
+		mRemoveErr  = d.stats.GetCounter("output.remove.error")
+		mRemoveSucc = d.stats.GetCounter("output.remove.success")
+		mAddErr     = d.stats.GetCounter("output.add.error")
+		mAddSucc    = d.stats.GetCounter("output.add.success")
+		mMsgsRcd    = d.stats.GetCounter("messages.received")
+		mOutputErr  = d.stats.GetCounter("output.error")
+		mMsgsSnt    = d.stats.GetCounter("messages.sent")
 	)
 
 	for atomic.LoadInt32(&d.running) == 1 {
@@ -340,6 +340,13 @@ func (d *DynamicFanOut) loop() {
 			return
 		}
 	}
+}
+
+// Connected returns a boolean indicating whether this output is currently
+// connected to its target.
+func (d *DynamicFanOut) Connected() bool {
+	// Always return true as this is fuzzy right now.
+	return true
 }
 
 // CloseAsync shuts down the DynamicFanOut broker and stops processing requests.

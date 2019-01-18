@@ -102,7 +102,7 @@ type AMQP struct {
 func NewAMQP(conf AMQPConfig, log log.Modular, stats metrics.Type) (*AMQP, error) {
 	a := AMQP{
 		key:          text.NewInterpolatedString(conf.BindingKey),
-		log:          log.NewModule(".output.amqp"),
+		log:          log,
 		stats:        stats,
 		conf:         conf,
 		deliveryMode: amqp.Transient,
@@ -174,7 +174,7 @@ func (a *AMQP) Connect() error {
 		a.returnChan = amqpChan.NotifyReturn(make(chan amqp.Return, 1))
 	}
 
-	a.log.Infof("Sending AMQP messages to URL: %s\n", a.conf.URL)
+	a.log.Infof("Sending AMQP messages to exchange: %v\n", a.conf.Exchange)
 	return nil
 }
 

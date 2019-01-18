@@ -25,6 +25,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io/ioutil"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -38,8 +39,8 @@ func init() {
 	Constructors[TypeDecode] = TypeSpec{
 		constructor: NewDecode,
 		description: `
-Decodes parts of a message according to the selected scheme. Supported available
-schemes are: base64.`,
+Decodes messages according to the selected scheme. Supported available schemes
+are: base64.`,
 	}
 }
 
@@ -88,11 +89,9 @@ type Decode struct {
 	stats metrics.Type
 
 	mCount     metrics.StatCounter
-	mSucc      metrics.StatCounter
 	mErr       metrics.StatCounter
-	mSkipped   metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewDecode returns a Decode processor.
@@ -106,15 +105,13 @@ func NewDecode(
 	return &Decode{
 		conf:  conf.Decode,
 		fn:    cor,
-		log:   log.NewModule(".processor.decode"),
+		log:   log,
 		stats: stats,
 
-		mCount:     stats.GetCounter("processor.decode.count"),
-		mSucc:      stats.GetCounter("processor.decode.success"),
-		mErr:       stats.GetCounter("processor.decode.error"),
-		mSkipped:   stats.GetCounter("processor.decode.skipped"),
-		mSent:      stats.GetCounter("processor.decode.sent"),
-		mSentParts: stats.GetCounter("processor.decode.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -124,38 +121,47 @@ func NewDecode(
 // resulting messages or a response to be sent back to the message source.
 func (c *Decode) ProcessMessage(msg types.Message) ([]types.Message, types.Response) {
 	c.mCount.Incr(1)
-
 	newMsg := msg.Copy()
 
-	targetParts := c.conf.Parts
-	if len(targetParts) == 0 {
-		targetParts = make([]int, newMsg.Len())
-		for i := range targetParts {
-			targetParts[i] = i
-		}
-	}
-
-	for _, index := range targetParts {
-		part := msg.Get(index).Get()
+	proc := func(i int) {
+		part := msg.Get(i).Get()
 		newPart, err := c.fn(part)
 		if err == nil {
-			c.mSucc.Incr(1)
-			newMsg.Get(index).Set(newPart)
+			newMsg.Get(i).Set(newPart)
 		} else {
 			c.log.Errorf("Failed to decode message part: %v\n", err)
 			c.mErr.Incr(1)
+			FlagFail(newMsg.Get(i))
+		}
+	}
+
+	if len(c.conf.Parts) == 0 {
+		for i := 0; i < msg.Len(); i++ {
+			proc(i)
+		}
+	} else {
+		for _, i := range c.conf.Parts {
+			proc(i)
 		}
 	}
 
 	if newMsg.Len() == 0 {
-		c.mSkipped.Incr(1)
 		return nil, response.NewAck()
 	}
 
-	c.mSent.Incr(1)
-	c.mSentParts.Incr(int64(newMsg.Len()))
+	c.mBatchSent.Incr(1)
+	c.mSent.Incr(int64(newMsg.Len()))
 	msgs := [1]types.Message{newMsg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (c *Decode) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (c *Decode) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

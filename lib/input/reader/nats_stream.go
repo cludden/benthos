@@ -44,6 +44,7 @@ type NATSStreamConfig struct {
 	DurableName     string   `json:"durable_name" yaml:"durable_name"`
 	StartFromOldest bool     `json:"start_from_oldest" yaml:"start_from_oldest"`
 	Subject         string   `json:"subject" yaml:"subject"`
+	MaxInflight     int      `json:"max_inflight" yaml:"max_inflight"`
 }
 
 // NewNATSStreamConfig creates a new NATSStreamConfig with default values.
@@ -56,6 +57,7 @@ func NewNATSStreamConfig() NATSStreamConfig {
 		DurableName:     "benthos_offset",
 		StartFromOldest: true,
 		Subject:         "benthos_messages",
+		MaxInflight:     1024,
 	}
 }
 
@@ -90,10 +92,11 @@ func NewNATSStream(conf NATSStreamConfig, log log.Modular, stats metrics.Type) (
 	n := NATSStream{
 		conf:          conf,
 		stats:         stats,
-		log:           log.NewModule(".input.nats_stream"),
+		log:           log,
 		msgChan:       make(chan *stan.Msg),
 		interruptChan: make(chan struct{}),
 	}
+	close(n.msgChan)
 	n.urls = strings.Join(conf.URLs, ",")
 
 	return &n, nil
@@ -123,21 +126,34 @@ func (n *NATSStream) Connect() error {
 		return nil
 	}
 
+	newMsgChan := make(chan *stan.Msg)
+	handler := func(m *stan.Msg) {
+		select {
+		case newMsgChan <- m:
+		case <-n.interruptChan:
+			n.disconnect()
+		}
+	}
+	dcHandler := func() {
+		if newMsgChan == nil {
+			return
+		}
+		close(newMsgChan)
+		newMsgChan = nil
+		n.disconnect()
+	}
+
 	natsConn, err := stan.Connect(
 		n.conf.ClusterID,
 		n.conf.ClientID,
 		stan.NatsURL(n.urls),
+		stan.SetConnectionLostHandler(func(_ stan.Conn, reason error) {
+			n.log.Errorf("Connection lost: %v", reason)
+			dcHandler()
+		}),
 	)
 	if err != nil {
 		return err
-	}
-
-	handler := func(m *stan.Msg) {
-		select {
-		case n.msgChan <- m:
-		case <-n.interruptChan:
-			n.disconnect()
-		}
 	}
 
 	options := []stan.SubscriptionOption{
@@ -150,6 +166,9 @@ func (n *NATSStream) Connect() error {
 		options = append(options, stan.DeliverAllAvailable())
 	} else {
 		options = append(options, stan.StartWithLastReceived())
+	}
+	if n.conf.MaxInflight != 0 {
+		options = append(options, stan.MaxInflight(n.conf.MaxInflight))
 	}
 
 	var natsSub stan.Subscription
@@ -174,15 +193,20 @@ func (n *NATSStream) Connect() error {
 
 	n.natsConn = natsConn
 	n.natsSub = natsSub
-	n.log.Infof("Receiving NATS Streaming messages from URLs: %s\n", n.urls)
+	n.msgChan = newMsgChan
+	n.log.Infof("Receiving NATS Streaming messages from subject: %v\n", n.conf.Subject)
 	return nil
 }
 
 // Read attempts to read a new message from the NATS streaming server.
 func (n *NATSStream) Read() (types.Message, error) {
 	var msg *stan.Msg
+	var open bool
 	select {
-	case msg = <-n.msgChan:
+	case msg, open = <-n.msgChan:
+		if !open {
+			return nil, types.ErrNotConnected
+		}
 		n.unAckMsgs = append(n.unAckMsgs, msg)
 	case <-n.interruptChan:
 		n.unAckMsgs = nil

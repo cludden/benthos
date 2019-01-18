@@ -22,6 +22,7 @@ package processor
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/message"
@@ -52,13 +53,24 @@ parallel requests with ` + "`max_parallel`" + `. Alternatively, you can use the
 ` + "[`archive`](#archive)" + ` processor to create a single message
 from the batch.
 
+The ` + "`rate_limit`" + ` field can be used to specify a rate limit
+[resource](../rate_limits/README.md) to cap the rate of requests across all
+parallel components service wide.
+
 The URL and header values of this type can be dynamically set using function
 interpolations described [here](../config_interpolation.md#functions).
 
 In order to map or encode the payload to a specific request body, and map the
 response back into the original payload instead of replacing it entirely, you
 can use the ` + "[`process_map`](#process_map)" + ` or
- ` + "[`process_field`](#process_field)" + ` processors.`,
+ ` + "[`process_field`](#process_field)" + ` processors.
+ 
+### Error Handling
+
+When all retry attempts for a message are exhausted the processor cancels the
+attempt. These failed messages will continue through the pipeline unchanged, but
+can be dropped or placed in a dead letter queue according to your config, you
+can read about these patterns [here](../error_handling.md).`,
 	}
 }
 
@@ -97,9 +109,8 @@ type HTTP struct {
 	mCount     metrics.StatCounter
 	mErrHTTP   metrics.StatCounter
 	mErr       metrics.StatCounter
-	mSucc      metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewHTTP returns a HTTP processor.
@@ -108,24 +119,24 @@ func NewHTTP(
 ) (Type, error) {
 	g := &HTTP{
 		conf:  conf,
-		log:   log.NewModule(".processor.http"),
+		log:   log,
 		stats: stats,
 
 		parallel: conf.HTTP.Parallel,
 		max:      conf.HTTP.MaxParallel,
 
-		mCount:     stats.GetCounter("processor.http.count"),
-		mSucc:      stats.GetCounter("processor.http.success"),
-		mErr:       stats.GetCounter("processor.http.error"),
-		mErrHTTP:   stats.GetCounter("processor.http.error.http"),
-		mSent:      stats.GetCounter("processor.http.sent"),
-		mSentParts: stats.GetCounter("processor.http.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErrHTTP:   stats.GetCounter("error.http"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}
 	var err error
 	if g.client, err = client.New(
 		conf.HTTP.Client,
 		client.OptSetLogger(g.log),
-		client.OptSetStats(metrics.Namespaced(g.stats, "processor.http")),
+		client.OptSetStats(metrics.Namespaced(g.stats, "client")),
+		client.OptSetManager(mgr),
 	); err != nil {
 		return nil, err
 	}
@@ -144,13 +155,14 @@ func (h *HTTP) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 		// Easy, just do a single request.
 		var err error
 		if responseMsg, err = h.client.Send(msg); err != nil {
-			if err != nil {
-				h.mErr.Incr(1)
-				h.mErrHTTP.Incr(1)
-				return nil, response.NewError(fmt.Errorf(
-					"HTTP request '%v' failed: %v", h.conf.HTTP.Client.URL, err,
-				))
-			}
+			h.mErr.Incr(1)
+			h.mErrHTTP.Incr(1)
+			h.log.Errorf("HTTP parallel request to '%v' failed: %v\n", h.conf.HTTP.Client.URL, err)
+			responseMsg = msg
+			responseMsg.Iter(func(i int, p types.Part) error {
+				FlagFail(p)
+				return nil
+			})
 		}
 	} else {
 		// Hard, need to do parallel requests limited by max parallelism.
@@ -175,6 +187,8 @@ func (h *HTTP) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 					}
 					if err == nil {
 						results[index] = result.Get(0)
+					} else {
+						FlagFail(results[index])
 					}
 					resChan <- err
 				}
@@ -187,6 +201,7 @@ func (h *HTTP) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 		}()
 		for i := 0; i < msg.Len(); i++ {
 			if err := <-resChan; err != nil {
+				h.mErr.Incr(1)
 				h.mErrHTTP.Incr(1)
 				h.log.Errorf("HTTP parallel request to '%v' failed: %v\n", h.conf.HTTP.Client.URL, err)
 			}
@@ -198,19 +213,25 @@ func (h *HTTP) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 	}
 
 	if responseMsg.Len() < 1 {
-		h.mErr.Incr(1)
-		h.mErrHTTP.Incr(1)
 		return nil, response.NewError(fmt.Errorf(
 			"HTTP response from '%v' was empty", h.conf.HTTP.Client.URL,
 		))
 	}
 
-	h.mSucc.Incr(1)
 	msgs := [1]types.Message{responseMsg}
 
-	h.mSent.Incr(1)
-	h.mSentParts.Incr(int64(responseMsg.Len()))
+	h.mBatchSent.Incr(1)
+	h.mSent.Incr(int64(responseMsg.Len()))
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (h *HTTP) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (h *HTTP) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

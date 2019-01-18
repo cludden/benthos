@@ -21,6 +21,9 @@
 package processor
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
 	"github.com/Jeffail/benthos/lib/processor/condition"
@@ -34,10 +37,13 @@ func init() {
 		constructor: NewConditional,
 		description: `
 Conditional is a processor that has a list of child ` + "`processors`," + `
-` + "`else_processors`" + `, and a condition. For each message, if the condition
-passes, the child ` + "`processors`" + ` will be applied, otherwise the
-` + "`else_processors`" + ` are applied. This processor is useful for applying
-processors based on the content type of the message.
+` + "`else_processors`" + `, and a condition. For each message batch, if the
+condition passes, the child ` + "`processors`" + ` will be applied, otherwise
+the ` + "`else_processors`" + ` are applied. This processor is useful for
+applying processors based on the content of message batches.
+
+In order to conditionally process each message of a batch individually use this
+processor with the ` + "[`process_batch`](#process_batch)" + ` processor.
 
 You can find a [full list of conditions here](../conditions).`,
 		sanitiseConfigFunc: func(conf Config) (interface{}, error) {
@@ -91,8 +97,8 @@ func NewConditionalConfig() ConditionalConfig {
 // condition.
 type Conditional struct {
 	cond         condition.Type
-	children     []Type
-	elseChildren []Type
+	children     []types.Processor
+	elseChildren []types.Processor
 
 	log log.Modular
 
@@ -100,25 +106,23 @@ type Conditional struct {
 	mCondPassed metrics.StatCounter
 	mCondFailed metrics.StatCounter
 	mSent       metrics.StatCounter
-	mSentParts  metrics.StatCounter
-	mDropped    metrics.StatCounter
+	mBatchSent  metrics.StatCounter
 }
 
 // NewConditional returns a Conditional processor.
 func NewConditional(
 	conf Config, mgr types.Manager, log log.Modular, stats metrics.Type,
 ) (Type, error) {
-	nsStats := metrics.Namespaced(stats, "processor.conditional")
-	nsLog := log.NewModule(".processor.conditional")
-	cond, err := condition.New(conf.Conditional.Condition, mgr, nsLog, nsStats)
+	cond, err := condition.New(conf.Conditional.Condition, mgr, log.NewModule(".condition"), metrics.Namespaced(stats, "condition"))
 	if err != nil {
 		return nil, err
 	}
 
-	nsStats = metrics.Namespaced(stats, "processor.conditional.if")
-	nsLog = log.NewModule(".processor.conditional.if")
-	var children []Type
-	for _, pconf := range conf.Conditional.Processors {
+	var children []types.Processor
+	for i, pconf := range conf.Conditional.Processors {
+		ns := fmt.Sprintf("if.%v", i)
+		nsStats := metrics.Namespaced(stats, ns)
+		nsLog := log.NewModule("." + ns)
 		var proc Type
 		if proc, err = New(pconf, mgr, nsLog, nsStats); err != nil {
 			return nil, err
@@ -126,10 +130,11 @@ func NewConditional(
 		children = append(children, proc)
 	}
 
-	nsStats = metrics.Namespaced(stats, "processor.conditional.else")
-	nsLog = log.NewModule(".processor.conditional.else")
-	var elseChildren []Type
-	for _, pconf := range conf.Conditional.ElseProcessors {
+	var elseChildren []types.Processor
+	for i, pconf := range conf.Conditional.ElseProcessors {
+		ns := fmt.Sprintf("else.%v", i)
+		nsStats := metrics.Namespaced(stats, ns)
+		nsLog := log.NewModule("." + ns)
 		var proc Type
 		if proc, err = New(pconf, mgr, nsLog, nsStats); err != nil {
 			return nil, err
@@ -142,14 +147,13 @@ func NewConditional(
 		children:     children,
 		elseChildren: elseChildren,
 
-		log: log.NewModule(".processor.conditional"),
+		log: log,
 
-		mCount:      stats.GetCounter("processor.conditional.count"),
-		mCondPassed: stats.GetCounter("processor.conditional.passed"),
-		mCondFailed: stats.GetCounter("processor.conditional.failed"),
-		mSent:       stats.GetCounter("processor.conditional.sent"),
-		mSentParts:  stats.GetCounter("processor.conditional.parts.sent"),
-		mDropped:    stats.GetCounter("processor.conditional.dropped"),
+		mCount:      stats.GetCounter("count"),
+		mCondPassed: stats.GetCounter("passed"),
+		mCondFailed: stats.GetCounter("failed"),
+		mSent:       stats.GetCounter("sent"),
+		mBatchSent:  stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -160,7 +164,7 @@ func NewConditional(
 func (c *Conditional) ProcessMessage(msg types.Message) (msgs []types.Message, res types.Response) {
 	c.mCount.Incr(1)
 
-	var procs []Type
+	var procs []types.Processor
 
 	if c.cond.Check(msg) {
 		c.mCondPassed.Incr(1)
@@ -172,33 +176,46 @@ func (c *Conditional) ProcessMessage(msg types.Message) (msgs []types.Message, r
 		procs = c.elseChildren
 	}
 
-	resultMsgs := []types.Message{msg}
-	var resultRes types.Response
-
-	for i := 0; len(resultMsgs) > 0 && i < len(procs); i++ {
-		var nextResultMsgs []types.Message
-		for _, m := range resultMsgs {
-			var rMsgs []types.Message
-			rMsgs, resultRes = procs[i].ProcessMessage(m)
-			nextResultMsgs = append(nextResultMsgs, rMsgs...)
-		}
-		resultMsgs = nextResultMsgs
-	}
-
+	resultMsgs, resultRes := ExecuteAll(procs, msg)
 	if len(resultMsgs) == 0 {
-		c.mDropped.Incr(1)
 		res = resultRes
 	} else {
-		c.mSent.Incr(int64(len(resultMsgs)))
+		c.mBatchSent.Incr(int64(len(resultMsgs)))
 		totalParts := 0
 		for _, msg := range resultMsgs {
 			totalParts += msg.Len()
 		}
-		c.mSentParts.Incr(int64(totalParts))
+		c.mSent.Incr(int64(totalParts))
 		msgs = resultMsgs
 	}
 
 	return
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (c *Conditional) CloseAsync() {
+	for _, p := range c.children {
+		p.CloseAsync()
+	}
+	for _, p := range c.elseChildren {
+		p.CloseAsync()
+	}
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (c *Conditional) WaitForClose(timeout time.Duration) error {
+	stopBy := time.Now().Add(timeout)
+	for _, p := range c.children {
+		if err := p.WaitForClose(time.Until(stopBy)); err != nil {
+			return err
+		}
+	}
+	for _, p := range c.elseChildren {
+		if err := p.WaitForClose(time.Until(stopBy)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 //------------------------------------------------------------------------------

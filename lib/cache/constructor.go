@@ -31,11 +31,12 @@ import (
 	"github.com/Jeffail/benthos/lib/metrics"
 	"github.com/Jeffail/benthos/lib/types"
 	"github.com/Jeffail/benthos/lib/util/config"
+	yaml "gopkg.in/yaml.v2"
 )
 
 //------------------------------------------------------------------------------
 
-// TypeSpec is a constructor and a usage description for each input type.
+// TypeSpec is a constructor and a usage description for each cache type.
 type TypeSpec struct {
 	constructor func(conf Config, mgr types.Manager, log log.Modular, stats metrics.Type) (types.Cache, error)
 	description string
@@ -51,6 +52,7 @@ const (
 	TypeDynamoDB  = "dynamodb"
 	TypeMemcached = "memcached"
 	TypeMemory    = "memory"
+	TypeRedis     = "redis"
 )
 
 //------------------------------------------------------------------------------
@@ -61,6 +63,7 @@ type Config struct {
 	DynamoDB  DynamoDBConfig  `json:"dynamodb" yaml:"dynamodb"`
 	Memcached MemcachedConfig `json:"memcached" yaml:"memcached"`
 	Memory    MemoryConfig    `json:"memory" yaml:"memory"`
+	Redis     RedisConfig     `json:"redis" yaml:"redis"`
 }
 
 // NewConfig returns a configuration struct fully populated with default values.
@@ -70,6 +73,7 @@ func NewConfig() Config {
 		DynamoDB:  NewDynamoDBConfig(),
 		Memcached: NewMemcachedConfig(),
 		Memory:    NewMemoryConfig(),
+		Redis:     NewRedisConfig(),
 	}
 }
 
@@ -194,12 +198,26 @@ func Descriptions() string {
 
 	// Append each description
 	for i, name := range names {
+		var confBytes []byte
+
+		conf := NewConfig()
+		conf.Type = name
+		if confSanit, err := SanitiseConfig(conf); err == nil {
+			confBytes, _ = yaml.Marshal(confSanit)
+		}
+
 		buf.WriteString("## ")
 		buf.WriteString("`" + name + "`")
 		buf.WriteString("\n")
+		if confBytes != nil {
+			buf.WriteString("\n``` yaml\n")
+			buf.Write(confBytes)
+			buf.WriteString("```\n")
+		}
 		buf.WriteString(Constructors[name].description)
+		buf.WriteString("\n")
 		if i != (len(names) - 1) {
-			buf.WriteString("\n\n")
+			buf.WriteString("\n")
 		}
 	}
 	return buf.String()
@@ -213,7 +231,7 @@ func New(
 	stats metrics.Type,
 ) (types.Cache, error) {
 	if c, ok := Constructors[conf.Type]; ok {
-		cache, err := c.constructor(conf, mgr, log, stats)
+		cache, err := c.constructor(conf, mgr, log.NewModule("."+conf.Type), stats)
 		for err != nil {
 			return nil, fmt.Errorf("failed to create cache '%v': %v", conf.Type, err)
 		}

@@ -81,15 +81,18 @@ duplicate condition configs by using the [resource condition][resource].
 ### Contents
 
 1. [`and`](#and)
-2. [`count`](#count)
-3. [`jmespath`](#jmespath)
-4. [`metadata`](#metadata)
-5. [`not`](#not)
-6. [`or`](#or)
-7. [`resource`](#resource)
-8. [`static`](#static)
-9. [`text`](#text)
-10. [`xor`](#xor)
+2. [`bounds_check`](#bounds_check)
+3. [`check_field`](#check_field)
+4. [`count`](#count)
+5. [`jmespath`](#jmespath)
+6. [`metadata`](#metadata)
+7. [`not`](#not)
+8. [`or`](#or)
+9. [`processor_failed`](#processor_failed)
+10. [`resource`](#resource)
+11. [`static`](#static)
+12. [`text`](#text)
+13. [`xor`](#xor)
 
 ## `and`
 
@@ -99,6 +102,32 @@ and: []
 ```
 
 And is a condition that returns the logical AND of its children conditions.
+
+## `bounds_check`
+
+``` yaml
+type: bounds_check
+bounds_check:
+  max_part_size: 1.073741824e+09
+  max_parts: 100
+  min_part_size: 1
+  min_parts: 1
+```
+
+Checks a message against a set of bounds.
+
+## `check_field`
+
+``` yaml
+type: check_field
+check_field:
+  condition: {}
+  parts: []
+  path: ""
+```
+
+Extracts the value of a field within messages (currently only JSON format is
+supported) and then tests the extracted value against a child condition.
 
 ## `count`
 
@@ -170,19 +199,95 @@ metadata:
 Metadata is a condition that checks metadata keys of a message part against an
 operator from the following list:
 
-### `exists`
+### `enum`
 
-Checks whether a metadata key exists.
+Checks whether the contents of a metadata key matches one of the defined enum
+values.
+
+```yaml
+type: metadata
+metadata:
+  operator: enum
+  part: 0
+  key: foo
+  arg:
+    - bar
+    - baz
+    - qux
+    - quux
+```
 
 ### `equals`
 
 Checks whether the contents of a metadata key matches an argument. This operator
 is case insensitive.
 
+```yaml
+type: metadata
+metadata:
+  operator: equals
+  part: 0
+  key: foo
+  arg: bar
+```
+
 ### `equals_cs`
 
 Checks whether the contents of a metadata key matches an argument. This operator
 is case sensitive.
+
+```yaml
+type: metadata
+metadata:
+  operator: equals_cs
+  part: 0
+  key: foo
+  arg: BAR
+```
+
+### `exists`
+
+Checks whether a metadata key exists.
+
+```yaml
+type: metadata
+metadata:
+  operator: exists
+  part: 0
+  key: foo
+```
+
+### `greater_than`
+
+Checks whether the contents of a metadata key, parsed as a floating point
+number, is greater than an argument. Returns false if the metadata value cannot
+be parsed into a number.
+
+```yaml
+type: metadata
+metadata:
+  operator: greater_than
+  part: 0
+  key: foo
+  arg: 3
+```
+
+### `has_prefix`
+
+Checks whether the contents of a metadata key match one of the provided prefixes.
+The arg field can either be a singular prefix string or a list of prefixes.
+
+```yaml
+type: metadata
+metadata:
+  operator: has_prefix
+  part: 0
+  key: foo
+  arg:
+    - foo
+    - bar
+    - baz
+```
 
 ### `less_than`
 
@@ -190,11 +295,43 @@ Checks whether the contents of a metadata key, parsed as a floating point
 number, is less than an argument. Returns false if the metadata value cannot be
 parsed into a number.
 
-### `greater_than`
+```yaml
+type: metadata
+metadata:
+  operator: less_than
+  part: 0
+  key: foo
+  arg: 3
+```
 
-Checks whether the contents of a metadata key, parsed as a floating point
-number, is greater than an argument. Returns false if the metadata value cannot
-be parsed into a number.
+### `regexp_partial`
+
+Checks whether any section of the contents of a metadata key matches a regular
+expression (RE2 syntax).
+
+```yaml
+type: metadata
+metadata:
+  operator: regexp_partial
+  part: 0
+  key: foo
+  arg: "1[a-z]2"
+```
+
+### `regexp_exact`
+
+Checks whether the contents of a metadata key exactly matches a regular expression 
+(RE2 syntax).
+
+```yaml
+type: metadata
+metadata:
+  operator: regexp_partial
+  part: 0
+  key: foo
+  arg: "1[a-z]2"
+```
+
 
 ## `not`
 
@@ -241,6 +378,18 @@ or: []
 ```
 
 Or is a condition that returns the logical OR of its children conditions.
+
+## `processor_failed`
+
+``` yaml
+type: processor_failed
+processor_failed:
+  part: 0
+```
+
+Returns true if a processing stage of a message has failed. This condition is
+useful for dropping failed messages or creating dead letter queues, you can read
+more about these patterns [here](../error_handling.md).
 
 ## `resource`
 
@@ -289,11 +438,6 @@ resources:
         part: 1
         arg: filter me please
 ```
-
-It is also worth noting that when conditions are used as resources in this way
-they will only be executed once per message, regardless of how many times they
-are referenced (unless the content is modified). Therefore, resource conditions
-can act as a runtime optimisation as well as a config optimisation.
 
 ## `static`
 

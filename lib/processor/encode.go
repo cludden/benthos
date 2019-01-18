@@ -24,6 +24,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -37,8 +38,8 @@ func init() {
 	Constructors[TypeEncode] = TypeSpec{
 		constructor: NewEncode,
 		description: `
-Encodes parts of a message according to the selected scheme. Supported schemes
-are: base64.`,
+Encodes messages according to the selected scheme. Supported schemes are:
+base64.`,
 	}
 }
 
@@ -92,11 +93,9 @@ type Encode struct {
 	stats metrics.Type
 
 	mCount     metrics.StatCounter
-	mSucc      metrics.StatCounter
 	mErr       metrics.StatCounter
-	mSkipped   metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewEncode returns a Encode processor.
@@ -110,15 +109,13 @@ func NewEncode(
 	return &Encode{
 		conf:  conf.Encode,
 		fn:    cor,
-		log:   log.NewModule(".processor.encode"),
+		log:   log,
 		stats: stats,
 
-		mCount:     stats.GetCounter("processor.encode.count"),
-		mSucc:      stats.GetCounter("processor.encode.success"),
-		mErr:       stats.GetCounter("processor.encode.error"),
-		mSkipped:   stats.GetCounter("processor.encode.skipped"),
-		mSent:      stats.GetCounter("processor.encode.sent"),
-		mSentParts: stats.GetCounter("processor.encode.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -128,38 +125,47 @@ func NewEncode(
 // resulting messages or a response to be sent back to the message source.
 func (c *Encode) ProcessMessage(msg types.Message) ([]types.Message, types.Response) {
 	c.mCount.Incr(1)
-
 	newMsg := msg.Copy()
 
-	targetParts := c.conf.Parts
-	if len(targetParts) == 0 {
-		targetParts = make([]int, newMsg.Len())
-		for i := range targetParts {
-			targetParts[i] = i
-		}
-	}
-
-	for _, index := range targetParts {
+	proc := func(index int) {
 		part := msg.Get(index).Get()
 		newPart, err := c.fn(part)
 		if err == nil {
-			c.mSucc.Incr(1)
 			newMsg.Get(index).Set(newPart)
 		} else {
 			c.log.Debugf("Failed to encode message part: %v\n", err)
 			c.mErr.Incr(1)
+			FlagFail(newMsg.Get(index))
+		}
+	}
+
+	if len(c.conf.Parts) == 0 {
+		for i := 0; i < msg.Len(); i++ {
+			proc(i)
+		}
+	} else {
+		for _, i := range c.conf.Parts {
+			proc(i)
 		}
 	}
 
 	if newMsg.Len() == 0 {
-		c.mSkipped.Incr(1)
 		return nil, response.NewAck()
 	}
 
-	c.mSent.Incr(1)
-	c.mSentParts.Incr(int64(newMsg.Len()))
+	c.mBatchSent.Incr(1)
+	c.mSent.Incr(int64(newMsg.Len()))
 	msgs := [1]types.Message{newMsg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (c *Encode) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (c *Encode) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

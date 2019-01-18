@@ -22,6 +22,7 @@ package processor
 
 import (
 	"math/rand"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -35,9 +36,9 @@ func init() {
 	Constructors[TypeSample] = TypeSpec{
 		constructor: NewSample,
 		description: `
-Retains a randomly sampled percentage of messages (0 to 100) and drops all
-others. The random seed is static in order to sample deterministically, but can
-be set in config to allow parallel samples that are unique.`,
+Retains a randomly sampled percentage of message batches (0 to 100) and drops
+all others. The random seed is static in order to sample deterministically, but
+can be set in config to allow parallel samples that are unique.`,
 	}
 }
 
@@ -71,7 +72,7 @@ type Sample struct {
 	mCount     metrics.StatCounter
 	mDropped   metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewSample returns a Sample processor.
@@ -81,15 +82,15 @@ func NewSample(
 	gen := rand.New(rand.NewSource(conf.Sample.RandomSeed))
 	return &Sample{
 		conf:   conf,
-		log:    log.NewModule(".processor.sample"),
+		log:    log,
 		stats:  stats,
 		retain: conf.Sample.Retain / 100.0,
 		gen:    gen,
 
-		mCount:     stats.GetCounter("processor.sample.count"),
-		mDropped:   stats.GetCounter("processor.sample.dropped"),
-		mSent:      stats.GetCounter("processor.sample.sent"),
-		mSentParts: stats.GetCounter("processor.sample.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mDropped:   stats.GetCounter("dropped"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -103,10 +104,19 @@ func (s *Sample) ProcessMessage(msg types.Message) ([]types.Message, types.Respo
 		s.mDropped.Incr(1)
 		return nil, response.NewAck()
 	}
-	s.mSent.Incr(1)
-	s.mSentParts.Incr(int64(msg.Len()))
+	s.mBatchSent.Incr(1)
+	s.mSent.Incr(int64(msg.Len()))
 	msgs := [1]types.Message{msg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (s *Sample) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (s *Sample) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

@@ -22,7 +22,6 @@ package message
 
 import (
 	"encoding/json"
-	"errors"
 
 	"github.com/Jeffail/benthos/lib/message/metadata"
 	"github.com/Jeffail/benthos/lib/types"
@@ -80,8 +79,11 @@ func (p *Part) DeepCopy() types.Part {
 			clonedJSON = nil
 		}
 	}
-	np := make([]byte, len(p.data))
-	copy(np, p.data)
+	var np []byte
+	if p.data != nil {
+		np = make([]byte, len(p.data))
+		copy(np, p.data)
+	}
 	return &Part{
 		data:      np,
 		metadata:  clonedMeta,
@@ -93,6 +95,13 @@ func (p *Part) DeepCopy() types.Part {
 
 // Get returns the body of the message part.
 func (p *Part) Get() []byte {
+	if p.data == nil && p.jsonCache != nil {
+		partBytes, err := json.Marshal(p.jsonCache)
+		if err != nil {
+			return nil
+		}
+		p.data = partBytes
+	}
 	return p.data
 }
 
@@ -111,7 +120,7 @@ func (p *Part) JSON() (interface{}, error) {
 		return p.jsonCache, nil
 	}
 	if p.data == nil {
-		return nil, errors.New("part is nil")
+		return nil, ErrMessagePartNotExist
 	}
 	if err := json.Unmarshal(p.data, &p.jsonCache); err != nil {
 		return nil, err
@@ -135,14 +144,19 @@ func (p *Part) SetMetadata(meta types.Metadata) types.Part {
 // SetJSON attempts to marshal a JSON document into a byte slice and stores the
 // result as the contents of the message part.
 func (p *Part) SetJSON(jObj interface{}) error {
-	partBytes, err := json.Marshal(jObj)
-	if err != nil {
-		return err
+	p.data = nil
+	if jObj == nil {
+		p.data = []byte(`null`)
 	}
-
-	p.data = partBytes
 	p.jsonCache = jObj
 	return nil
+}
+
+//------------------------------------------------------------------------------
+
+// IsEmpty returns true if the message part is empty.
+func (p *Part) IsEmpty() bool {
+	return len(p.data) == 0 && p.jsonCache == nil
 }
 
 //------------------------------------------------------------------------------

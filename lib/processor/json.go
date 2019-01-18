@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -39,8 +40,8 @@ func init() {
 	Constructors[TypeJSON] = TypeSpec{
 		constructor: NewJSON,
 		description: `
-Parses a message part as a JSON document, performs a mutation on the data, and
-then overwrites the previous contents with the new value.
+Parses messages as a JSON document, performs a mutation on the data, and then
+overwrites the previous contents with the new value.
 
 If the path is empty or "." the root of the data will be targeted.
 
@@ -142,6 +143,7 @@ func (r *rawJSONValue) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	}
 
 	var convertMap func(m map[interface{}]interface{}) map[string]interface{}
+	var convertArray func(a []interface{})
 	convertMap = func(m map[interface{}]interface{}) map[string]interface{} {
 		newMap := map[string]interface{}{}
 		for k, v := range m {
@@ -150,16 +152,33 @@ func (r *rawJSONValue) UnmarshalYAML(unmarshal func(interface{}) error) error {
 				continue
 			}
 			newVal := v
-			if iMap, isIMap := v.(map[interface{}]interface{}); isIMap {
-				newVal = convertMap(iMap)
+			switch t := v.(type) {
+			case []interface{}:
+				convertArray(t)
+			case map[interface{}]interface{}:
+				newVal = convertMap(t)
 			}
 			newMap[keyStr] = newVal
 		}
 		return newMap
 	}
-
-	if iMap, isIMap := yamlObj.(map[interface{}]interface{}); isIMap {
-		yamlObj = convertMap(iMap)
+	convertArray = func(a []interface{}) {
+		for i, v := range a {
+			newVal := v
+			switch t := v.(type) {
+			case []interface{}:
+				convertArray(t)
+			case map[interface{}]interface{}:
+				newVal = convertMap(t)
+			}
+			a[i] = newVal
+		}
+	}
+	switch t := yamlObj.(type) {
+	case []interface{}:
+		convertArray(t)
+	case map[interface{}]interface{}:
+		yamlObj = convertMap(t)
 	}
 
 	rawJSON, err := json.Marshal(yamlObj)
@@ -470,9 +489,8 @@ type JSON struct {
 	mErrJSONP  metrics.StatCounter
 	mErrJSONS  metrics.StatCounter
 	mErr       metrics.StatCounter
-	mSucc      metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewJSON returns a JSON processor.
@@ -482,18 +500,17 @@ func NewJSON(
 	j := &JSON{
 		parts: conf.JSON.Parts,
 		conf:  conf,
-		log:   log.NewModule(".processor.json"),
+		log:   log,
 		stats: stats,
 
 		valueBytes: conf.JSON.Value,
 
-		mCount:     stats.GetCounter("processor.json.count"),
-		mErrJSONP:  stats.GetCounter("processor.json.error.json_parse"),
-		mErrJSONS:  stats.GetCounter("processor.json.error.json_set"),
-		mErr:       stats.GetCounter("processor.json.error"),
-		mSucc:      stats.GetCounter("processor.json.success"),
-		mSent:      stats.GetCounter("processor.json.sent"),
-		mSentParts: stats.GetCounter("processor.json.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErrJSONP:  stats.GetCounter("error.json_parse"),
+		mErrJSONS:  stats.GetCounter("error.json_set"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}
 
 	j.interpolate = text.ContainsFunctionVariables(j.valueBytes)
@@ -516,7 +533,6 @@ func NewJSON(
 // resulting messages or a response to be sent back to the message source.
 func (p *JSON) ProcessMessage(msg types.Message) ([]types.Message, types.Response) {
 	p.mCount.Incr(1)
-
 	newMsg := msg.Copy()
 
 	valueBytes := p.valueBytes
@@ -524,27 +540,22 @@ func (p *JSON) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 		valueBytes = text.ReplaceFunctionVariablesEscaped(msg, valueBytes)
 	}
 
-	targetParts := p.parts
-	if len(targetParts) == 0 {
-		targetParts = make([]int, newMsg.Len())
-		for i := range targetParts {
-			targetParts[i] = i
-		}
-	}
-
-	for _, index := range targetParts {
+	proc := func(index int) {
 		jsonPart, err := newMsg.Get(index).JSON()
 		if err != nil {
 			p.mErrJSONP.Incr(1)
+			p.mErr.Incr(1)
 			p.log.Debugf("Failed to parse part into json: %v\n", err)
-			continue
+			FlagFail(newMsg.Get(index))
+			return
 		}
 
 		var data interface{}
 		if data, err = p.operator(jsonPart, json.RawMessage(valueBytes)); err != nil {
 			p.mErr.Incr(1)
 			p.log.Debugf("Failed to apply operator: %v\n", err)
-			continue
+			FlagFail(newMsg.Get(index))
+			return
 		}
 
 		switch t := data.(type) {
@@ -555,20 +566,37 @@ func (p *JSON) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 		default:
 			if err = newMsg.Get(index).SetJSON(data); err != nil {
 				p.mErrJSONS.Incr(1)
+				p.mErr.Incr(1)
 				p.log.Debugf("Failed to convert json into part: %v\n", err)
+				FlagFail(newMsg.Get(index))
 			}
 		}
+	}
 
-		if err == nil {
-			p.mSucc.Incr(1)
+	if len(p.parts) == 0 {
+		for i := 0; i < msg.Len(); i++ {
+			proc(i)
+		}
+	} else {
+		for _, i := range p.parts {
+			proc(i)
 		}
 	}
 
 	msgs := [1]types.Message{newMsg}
 
-	p.mSent.Incr(1)
-	p.mSentParts.Incr(int64(newMsg.Len()))
+	p.mBatchSent.Incr(1)
+	p.mSent.Incr(int64(newMsg.Len()))
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (p *JSON) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (p *JSON) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

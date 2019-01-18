@@ -21,6 +21,8 @@
 package processor
 
 import (
+	"time"
+
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -34,14 +36,14 @@ func init() {
 	Constructors[TypeInsertPart] = TypeSpec{
 		constructor: NewInsertPart,
 		description: `
-Insert a new message part at an index. If the specified index is greater than
-the length of the existing parts it will be appended to the end.
+Insert a new message into a batch at an index. If the specified index is greater
+than the length of the existing batch it will be appended to the end.
 
-The index can be negative, and if so the part will be inserted from the end
-counting backwards starting from -1. E.g. if index = -1 then the new part will
-become the last part of the message, if index = -2 then the new part will be
-inserted before the last element, and so on. If the negative index is greater
-than the length of the existing parts it will be inserted at the beginning.
+The index can be negative, and if so the message will be inserted from the end
+counting backwards starting from -1. E.g. if index = -1 then the new message
+will become the last of the batch, if index = -2 then the new message will be
+inserted before the last message, and so on. If the negative index is greater
+than the length of the existing batch it will be inserted at the beginning.
 
 This processor will interpolate functions within the 'content' field, you can
 find a list of functions [here](../config_interpolation.md#functions).`,
@@ -78,7 +80,7 @@ type InsertPart struct {
 
 	mCount     metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewInsertPart returns a InsertPart processor.
@@ -91,12 +93,12 @@ func NewInsertPart(
 		part:        part,
 		interpolate: interpolate,
 		conf:        conf,
-		log:         log.NewModule(".processor.insert_part"),
+		log:         log,
 		stats:       stats,
 
-		mCount:     stats.GetCounter("processor.insert_part.count"),
-		mSent:      stats.GetCounter("processor.insert_part.sent"),
-		mSentParts: stats.GetCounter("processor.insert_part.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -137,10 +139,19 @@ func (p *InsertPart) ProcessMessage(msg types.Message) ([]types.Message, types.R
 		newMsg.Append(message.NewPart(newPart))
 	}
 
-	p.mSent.Incr(1)
-	p.mSentParts.Incr(int64(newMsg.Len()))
+	p.mBatchSent.Incr(1)
+	p.mSent.Incr(int64(newMsg.Len()))
 	msgs := [1]types.Message{newMsg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (p *InsertPart) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (p *InsertPart) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

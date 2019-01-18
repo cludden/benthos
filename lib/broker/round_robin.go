@@ -80,6 +80,17 @@ func (o *RoundRobin) Consume(ts <-chan types.Transaction) error {
 	return nil
 }
 
+// Connected returns a boolean indicating whether this output is currently
+// connected to its target.
+func (o *RoundRobin) Connected() bool {
+	for _, out := range o.outputs {
+		if !out.Connected() {
+			return false
+		}
+	}
+	return true
+}
+
 //------------------------------------------------------------------------------
 
 // loop is an internal loop that brokers incoming messages to many outputs.
@@ -92,7 +103,7 @@ func (o *RoundRobin) loop() {
 	}()
 
 	var (
-		mMsgsRcvd = o.stats.GetCounter("broker.round_robin.messages.received")
+		mMsgsRcvd = o.stats.GetCounter("messages.received")
 	)
 
 	i := 0

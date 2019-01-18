@@ -54,7 +54,7 @@ func TestHTTPClientRetries(t *testing.T) {
 
 	conf := NewConfig()
 	conf.URL = ts.URL + "/testpost"
-	conf.RetryMS = 1
+	conf.Retry = "1ms"
 	conf.NumRetries = 3
 
 	h, err := New(conf)
@@ -120,6 +120,30 @@ func TestHTTPClientSendBasic(t *testing.T) {
 			t.Errorf("Action timed out")
 			return
 		}
+	}
+}
+
+func TestHTTPClientDropOn(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"foo":"bar"}`))
+	}))
+	defer ts.Close()
+
+	conf := NewConfig()
+	conf.URL = ts.URL + "/testpost"
+	conf.DropOn = []int{400}
+
+	h, err := New(conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testMsg := message.New([][]byte{[]byte(`{"bar":"baz"}`)})
+
+	resMsg, err := h.Send(testMsg)
+	if err == nil {
+		t.Errorf("Expected error, received: %s", message.GetAllBytes(resMsg))
 	}
 }
 

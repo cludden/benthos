@@ -59,6 +59,9 @@ func (f *fakeMgr) GetCache(name string) (types.Cache, error) {
 func (f *fakeMgr) GetCondition(name string) (types.Condition, error) {
 	return nil, types.ErrConditionNotFound
 }
+func (f *fakeMgr) GetRateLimit(name string) (types.RateLimit, error) {
+	return nil, types.ErrRateLimitNotFound
+}
 func (f *fakeMgr) GetPipe(name string) (<-chan types.Transaction, error) {
 	return nil, types.ErrPipeNotFound
 }
@@ -318,6 +321,9 @@ func (e errCache) Get(key string) ([]byte, error) {
 	return nil, errors.New("test err")
 }
 func (e errCache) Set(key string, value []byte) error {
+	return errors.New("test err")
+}
+func (e errCache) SetMulti(items map[string][]byte) error {
 	return errors.New("test err")
 }
 func (e errCache) Add(key string, value []byte) error {

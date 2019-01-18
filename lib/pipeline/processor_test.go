@@ -38,7 +38,9 @@ import (
 var errMockProc = errors.New("this is an error from mock processor")
 
 type mockMsgProcessor struct {
-	dropChan chan bool
+	dropChan          chan bool
+	hasClosedAsync    bool
+	hasWaitedForClose bool
 }
 
 func (m *mockMsgProcessor) ProcessMessage(msg types.Message) ([]types.Message, types.Response) {
@@ -51,6 +53,17 @@ func (m *mockMsgProcessor) ProcessMessage(msg types.Message) ([]types.Message, t
 	})
 	msgs := [1]types.Message{newMsg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (m *mockMsgProcessor) CloseAsync() {
+	m.hasClosedAsync = true
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (m *mockMsgProcessor) WaitForClose(timeout time.Duration) error {
+	m.hasWaitedForClose = true
+	return nil
 }
 
 func TestProcessorPipeline(t *testing.T) {
@@ -140,98 +153,22 @@ func TestProcessorPipeline(t *testing.T) {
 		t.Error("Timed out")
 	}
 
-	// Respond with error
-	errTest := errors.New("this is a test")
-	select {
-	case procT.ResponseChan <- response.NewError(errTest):
-	case _, open := <-resChan:
-		if !open {
-			t.Error("Closed early")
-		} else {
-			t.Error("Premature response prop")
-		}
-	case <-time.After(time.Second):
-		t.Error("Timed out")
-	}
-
-	// Receive again
-	select {
-	case procT, open = <-proc.TransactionChan():
-		if !open {
-			t.Error("Closed early")
-		}
-		if exp, act := [][]byte{[]byte("foo"), []byte("bar")}, message.GetAllBytes(procT.Payload); !reflect.DeepEqual(exp, act) {
-			t.Errorf("Wrong message received: %s != %s", act, exp)
-		}
-	case res, open := <-resChan:
-		if !open {
-			t.Error("Closed early")
-		}
-		if res.Error() != nil {
-			t.Error(res.Error())
-		} else {
-			t.Error("Message was dropped")
-		}
-	case <-time.After(time.Second):
-		t.Error("Timed out")
-	}
-
 	// Respond without error
-	select {
-	case procT.ResponseChan <- response.NewAck():
-	case _, open := <-resChan:
-		if !open {
-			t.Error("Closed early")
-		} else {
-			t.Error("Premature response prop")
-		}
-	case <-time.After(time.Second):
-		t.Error("Timed out")
-	}
-
-	// Receive response
-	select {
-	case res, open := <-resChan:
-		if !open {
-			t.Error("Closed early")
-		} else if res.Error() != nil {
-			t.Error(res.Error())
-		}
-	case <-time.After(time.Second):
-		t.Error("Timed out")
-	}
-
-	// Do not drop next message
 	go func() {
-		mockProc.dropChan <- false
+		select {
+		case procT.ResponseChan <- response.NewAck():
+		case _, open := <-resChan:
+			if !open {
+				t.Error("Closed early")
+			} else {
+				t.Error("Premature response prop")
+			}
+		case <-time.After(time.Second):
+			t.Error("Timed out")
+		}
 	}()
 
-	// Send message
-	select {
-	case tChan <- types.NewTransaction(msg, resChan):
-	case <-time.After(time.Second):
-		t.Error("Timed out")
-	}
-	select {
-	case procT, open = <-proc.TransactionChan():
-		if !open {
-			t.Error("Closed early")
-		}
-		if exp, act := [][]byte{[]byte("foo"), []byte("bar")}, message.GetAllBytes(procT.Payload); !reflect.DeepEqual(exp, act) {
-			t.Errorf("Wrong message received: %s != %s", act, exp)
-		}
-	case <-time.After(time.Second):
-		t.Error("Timed out")
-	}
-
-	// Respond without error
-	select {
-	case procT.ResponseChan <- response.NewAck():
-	case <-time.After(time.Second):
-		t.Error("Timed out")
-	}
-
-	// Receive error
+	// Receive response
 	select {
 	case res, open := <-resChan:
 		if !open {
@@ -247,10 +184,18 @@ func TestProcessorPipeline(t *testing.T) {
 	if err := proc.WaitForClose(time.Second * 5); err != nil {
 		t.Error(err)
 	}
+	if !mockProc.hasClosedAsync {
+		t.Error("Expected mockproc to have closed asynchronously")
+	}
+	if !mockProc.hasWaitedForClose {
+		t.Error("Expected mockproc to have waited for close")
+	}
 }
 
 type mockMultiMsgProcessor struct {
-	N int
+	N                 int
+	hasClosedAsync    bool
+	hasWaitedForClose bool
 }
 
 func (m *mockMultiMsgProcessor) ProcessMessage(msg types.Message) ([]types.Message, types.Response) {
@@ -262,6 +207,17 @@ func (m *mockMultiMsgProcessor) ProcessMessage(msg types.Message) ([]types.Messa
 		msgs = append(msgs, newMsg)
 	}
 	return msgs, nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (m *mockMultiMsgProcessor) CloseAsync() {
+	m.hasClosedAsync = true
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (m *mockMultiMsgProcessor) WaitForClose(timeout time.Duration) error {
+	m.hasWaitedForClose = true
+	return nil
 }
 
 func TestProcessorMultiMsgs(t *testing.T) {
@@ -340,6 +296,12 @@ func TestProcessorMultiMsgs(t *testing.T) {
 	proc.CloseAsync()
 	if err := proc.WaitForClose(time.Second * 5); err != nil {
 		t.Error(err)
+	}
+	if !mockProc.hasClosedAsync {
+		t.Error("Expected mockproc to have closed asynchronously")
+	}
+	if !mockProc.hasWaitedForClose {
+		t.Error("Expected mockproc to have waited for close")
 	}
 }
 
@@ -443,5 +405,11 @@ func TestProcessorMultiMsgsOddSync(t *testing.T) {
 	proc.CloseAsync()
 	if err := proc.WaitForClose(time.Second * 5); err != nil {
 		t.Error(err)
+	}
+	if !mockProc.hasClosedAsync {
+		t.Error("Expected mockproc to have closed asynchronously")
+	}
+	if !mockProc.hasWaitedForClose {
+		t.Error("Expected mockproc to have waited for close")
 	}
 }

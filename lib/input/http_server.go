@@ -22,6 +22,7 @@ package input
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"mime"
@@ -71,23 +72,23 @@ You can access these metadata fields using
 
 // HTTPServerConfig contains configuration for the HTTPServer input type.
 type HTTPServerConfig struct {
-	Address   string `json:"address" yaml:"address"`
-	Path      string `json:"path" yaml:"path"`
-	WSPath    string `json:"ws_path" yaml:"ws_path"`
-	TimeoutMS int64  `json:"timeout_ms" yaml:"timeout_ms"`
-	CertFile  string `json:"cert_file" yaml:"cert_file"`
-	KeyFile   string `json:"key_file" yaml:"key_file"`
+	Address  string `json:"address" yaml:"address"`
+	Path     string `json:"path" yaml:"path"`
+	WSPath   string `json:"ws_path" yaml:"ws_path"`
+	Timeout  string `json:"timeout" yaml:"timeout"`
+	CertFile string `json:"cert_file" yaml:"cert_file"`
+	KeyFile  string `json:"key_file" yaml:"key_file"`
 }
 
 // NewHTTPServerConfig creates a new HTTPServerConfig with default values.
 func NewHTTPServerConfig() HTTPServerConfig {
 	return HTTPServerConfig{
-		Address:   "",
-		Path:      "/post",
-		WSPath:    "/post/ws",
-		TimeoutMS: 5000,
-		CertFile:  "",
-		KeyFile:   "",
+		Address:  "",
+		Path:     "/post",
+		WSPath:   "/post/ws",
+		Timeout:  "5s",
+		CertFile: "",
+		KeyFile:  "",
 	}
 }
 
@@ -105,26 +106,27 @@ type HTTPServer struct {
 	stats metrics.Type
 	log   log.Modular
 
-	mux    *http.ServeMux
-	server *http.Server
+	mux     *http.ServeMux
+	server  *http.Server
+	timeout time.Duration
 
 	transactions chan types.Transaction
 
 	closeChan  chan struct{}
 	closedChan chan struct{}
 
-	mCount     metrics.StatCounter
-	mCountF    metrics.StatCounter
-	mWSCount   metrics.StatCounter
-	mTimeout   metrics.StatCounter
-	mErr       metrics.StatCounter
-	mErrF      metrics.StatCounter
-	mWSErr     metrics.StatCounter
-	mSucc      metrics.StatCounter
-	mSuccF     metrics.StatCounter
-	mWSSucc    metrics.StatCounter
-	mAsyncErr  metrics.StatCounter
-	mAsyncSucc metrics.StatCounter
+	mCount      metrics.StatCounter
+	mPartsCount metrics.StatCounter
+	mRcvd       metrics.StatCounter
+	mPartsRcvd  metrics.StatCounter
+	mWSCount    metrics.StatCounter
+	mTimeout    metrics.StatCounter
+	mErr        metrics.StatCounter
+	mWSErr      metrics.StatCounter
+	mSucc       metrics.StatCounter
+	mWSSucc     metrics.StatCounter
+	mAsyncErr   metrics.StatCounter
+	mAsyncSucc  metrics.StatCounter
 }
 
 // NewHTTPServer creates a new HTTPServer input type.
@@ -137,29 +139,38 @@ func NewHTTPServer(conf Config, mgr types.Manager, log log.Modular, stats metric
 		server = &http.Server{Addr: conf.HTTPServer.Address, Handler: mux}
 	}
 
+	var timeout time.Duration
+	if len(conf.HTTPServer.Timeout) > 0 {
+		var err error
+		if timeout, err = time.ParseDuration(conf.HTTPServer.Timeout); err != nil {
+			return nil, fmt.Errorf("failed to parse timeout string: %v", err)
+		}
+	}
+
 	h := HTTPServer{
 		running:      1,
 		conf:         conf,
 		stats:        stats,
-		log:          log.NewModule(".input.http"),
+		log:          log,
 		mux:          mux,
 		server:       server,
+		timeout:      timeout,
 		transactions: make(chan types.Transaction),
 		closeChan:    make(chan struct{}),
 		closedChan:   make(chan struct{}),
 
-		mCount:     stats.GetCounter("input.http_server.count"),
-		mCountF:    stats.GetCounter("input.count"),
-		mWSCount:   stats.GetCounter("input.http_server.ws.count"),
-		mTimeout:   stats.GetCounter("input.http_server.send.timeout"),
-		mErr:       stats.GetCounter("input.http_server.send.error"),
-		mErrF:      stats.GetCounter("input.send.error"),
-		mWSErr:     stats.GetCounter("input.http_server.ws.send.error"),
-		mSucc:      stats.GetCounter("input.http_server.send.success"),
-		mSuccF:     stats.GetCounter("input.send.success"),
-		mWSSucc:    stats.GetCounter("input.http_server.ws.send.success"),
-		mAsyncErr:  stats.GetCounter("input.http_server.send.async_error"),
-		mAsyncSucc: stats.GetCounter("input.http_server.send.async_success"),
+		mCount:      stats.GetCounter("count"),
+		mPartsCount: stats.GetCounter("parts.count"),
+		mRcvd:       stats.GetCounter("batch.received"),
+		mPartsRcvd:  stats.GetCounter("received"),
+		mWSCount:    stats.GetCounter("ws.count"),
+		mTimeout:    stats.GetCounter("send.timeout"),
+		mErr:        stats.GetCounter("send.error"),
+		mWSErr:      stats.GetCounter("ws.send.error"),
+		mSucc:       stats.GetCounter("send.success"),
+		mWSSucc:     stats.GetCounter("ws.send.success"),
+		mAsyncErr:   stats.GetCounter("send.async_error"),
+		mAsyncSucc:  stats.GetCounter("send.async_success"),
 	}
 
 	if mux != nil {
@@ -187,9 +198,6 @@ func (h *HTTPServer) postHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Server closing", http.StatusServiceUnavailable)
 		return
 	}
-
-	h.mCount.Incr(1)
-	h.mCountF.Incr(1)
 
 	if r.Method != "POST" {
 		http.Error(w, "Incorrect method", http.StatusMethodNotAllowed)
@@ -250,10 +258,16 @@ func (h *HTTPServer) postHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	message.SetAllMetadata(msg, meta)
 
+	h.mCount.Incr(1)
+	h.mPartsCount.Incr(int64(msg.Len()))
+
+	h.mPartsRcvd.Incr(int64(msg.Len()))
+	h.mRcvd.Incr(1)
+
 	resChan := make(chan types.Response)
 	select {
 	case h.transactions <- types.NewTransaction(msg, resChan):
-	case <-time.After(time.Millisecond * time.Duration(h.conf.HTTPServer.TimeoutMS)):
+	case <-time.After(h.timeout):
 		h.mTimeout.Incr(1)
 		http.Error(w, "Request timed out", http.StatusRequestTimeout)
 		return
@@ -269,13 +283,11 @@ func (h *HTTPServer) postHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		} else if res.Error() != nil {
 			h.mErr.Incr(1)
-			h.mErrF.Incr(1)
 			http.Error(w, res.Error().Error(), http.StatusBadGateway)
 			return
 		}
 		h.mSucc.Incr(1)
-		h.mSuccF.Incr(1)
-	case <-time.After(time.Millisecond * time.Duration(h.conf.HTTPServer.TimeoutMS)):
+	case <-time.After(h.timeout):
 		h.mTimeout.Incr(1)
 		http.Error(w, "Request timed out", http.StatusRequestTimeout)
 		go func() {
@@ -283,10 +295,10 @@ func (h *HTTPServer) postHandler(w http.ResponseWriter, r *http.Request) {
 			resAsync := <-resChan
 			if resAsync.Error() != nil {
 				h.mAsyncErr.Incr(1)
-				h.mErrF.Incr(1)
+				h.mErr.Incr(1)
 			} else {
 				h.mAsyncSucc.Incr(1)
-				h.mSuccF.Incr(1)
+				h.mSucc.Incr(1)
 			}
 		}()
 		return
@@ -321,7 +333,7 @@ func (h *HTTPServer) wsHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			h.mWSCount.Incr(1)
-			h.mCountF.Incr(1)
+			h.mCount.Incr(1)
 		}
 
 		msg := message.New([][]byte{msgBytes})
@@ -349,11 +361,11 @@ func (h *HTTPServer) wsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			if res.Error() != nil {
 				h.mWSErr.Incr(1)
-				h.mErrF.Incr(1)
+				h.mErr.Incr(1)
 				throt.Retry()
 			} else {
 				h.mWSSucc.Incr(1)
-				h.mSuccF.Incr(1)
+				h.mSucc.Incr(1)
 				msgBytes = nil
 				throt.Reset()
 			}
@@ -366,7 +378,7 @@ func (h *HTTPServer) wsHandler(w http.ResponseWriter, r *http.Request) {
 //------------------------------------------------------------------------------
 
 func (h *HTTPServer) loop() {
-	mRunning := h.stats.GetGauge("input.http_server.running")
+	mRunning := h.stats.GetGauge("running")
 
 	defer func() {
 		atomic.StoreInt32(&h.running, 0)
@@ -413,6 +425,12 @@ func (h *HTTPServer) loop() {
 // this input.
 func (h *HTTPServer) TransactionChan() <-chan types.Transaction {
 	return h.transactions
+}
+
+// Connected returns a boolean indicating whether this input is currently
+// connected to its target.
+func (h *HTTPServer) Connected() bool {
+	return true
 }
 
 // CloseAsync shuts down the HTTPServer input and stops processing requests.

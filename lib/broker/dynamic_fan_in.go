@@ -98,7 +98,7 @@ func NewDynamicFanIn(
 	for _, opt := range options {
 		opt(d)
 	}
-	mAddErr := d.stats.GetCounter("broker.dynamic_fan_in.input.add.error")
+	mAddErr := d.stats.GetCounter("input.add.error")
 	for key, input := range inputs {
 		if err := d.addInput(key, input); err != nil {
 			mAddErr.Incr(1)
@@ -137,6 +137,13 @@ func (d *DynamicFanIn) SetInput(ident string, input DynamicInput, timeout time.D
 // broker.
 func (d *DynamicFanIn) TransactionChan() <-chan types.Transaction {
 	return d.transactionChan
+}
+
+// Connected returns a boolean indicating whether this output is currently
+// connected to its target.
+func (d *DynamicFanIn) Connected() bool {
+	// Always return true as this is fuzzy right now.
+	return true
 }
 
 //------------------------------------------------------------------------------
@@ -225,11 +232,11 @@ func (d *DynamicFanIn) managerLoop() {
 	}()
 
 	var (
-		mCount      = d.stats.GetCounter("broker.dynamic_fan_in.input.count")
-		mRemoveErr  = d.stats.GetCounter("broker.dynamic_fan_in.input.remove.error")
-		mRemoveSucc = d.stats.GetCounter("broker.dynamic_fan_in.input.remove.success")
-		mAddErr     = d.stats.GetCounter("broker.dynamic_fan_in.input.add.error")
-		mAddSucc    = d.stats.GetCounter("broker.dynamic_fan_in.input.add.success")
+		mCount      = d.stats.GetCounter("count")
+		mRemoveErr  = d.stats.GetCounter("input.remove.error")
+		mRemoveSucc = d.stats.GetCounter("input.remove.success")
+		mAddErr     = d.stats.GetCounter("input.add.error")
+		mAddSucc    = d.stats.GetCounter("input.add.success")
 	)
 
 	for {

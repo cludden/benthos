@@ -22,6 +22,7 @@ package processor
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -36,13 +37,11 @@ func init() {
 	Constructors[TypeFilter] = TypeSpec{
 		constructor: NewFilter,
 		description: `
-Tests each message against a condition, if the condition fails then the message
-is dropped. You can find a [full list of conditions here](../conditions).
+Tests each message batch against a condition, if the condition fails then the
+batch is dropped. You can find a [full list of conditions here](../conditions).
 
-NOTE: If you are combining messages into batches using the
-` + "[`combine`](#combine) or [`batch`](#batch)" + ` processors this filter will
-apply to the _whole_ batch. If you instead wish to filter _individual_ parts of
-the batch use the ` + "[`filter_parts`](#filter_parts)" + ` processor.`,
+In order to filter individual messages of a batch use the
+` + "[`filter_parts`](#filter_parts)" + ` processor.`,
 		sanitiseConfigFunc: func(conf Config) (interface{}, error) {
 			return condition.SanitiseConfig(conf.Filter.Config)
 		},
@@ -76,16 +75,14 @@ type Filter struct {
 	mCount     metrics.StatCounter
 	mDropped   metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewFilter returns a Filter processor.
 func NewFilter(
 	conf Config, mgr types.Manager, log log.Modular, stats metrics.Type,
 ) (Type, error) {
-	nsLog := log.NewModule(".processor.filter")
-	nsStats := metrics.Namespaced(stats, "processor.filter")
-	cond, err := condition.New(conf.Filter.Config, mgr, nsLog, nsStats)
+	cond, err := condition.New(conf.Filter.Config, mgr, log, stats)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to construct condition '%v': %v",
@@ -93,14 +90,14 @@ func NewFilter(
 		)
 	}
 	return &Filter{
-		log:       nsLog,
+		log:       log,
 		stats:     stats,
 		condition: cond,
 
-		mCount:     stats.GetCounter("processor.filter.count"),
-		mDropped:   stats.GetCounter("processor.filter.dropped"),
-		mSent:      stats.GetCounter("processor.filter.sent"),
-		mSentParts: stats.GetCounter("processor.filter.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mDropped:   stats.GetCounter("dropped"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -112,14 +109,23 @@ func (c *Filter) ProcessMessage(msg types.Message) ([]types.Message, types.Respo
 	c.mCount.Incr(1)
 
 	if !c.condition.Check(msg) {
-		c.mDropped.Incr(1)
+		c.mDropped.Incr(int64(msg.Len()))
 		return nil, response.NewAck()
 	}
 
-	c.mSent.Incr(1)
-	c.mSentParts.Incr(int64(msg.Len()))
+	c.mBatchSent.Incr(1)
+	c.mSent.Incr(int64(msg.Len()))
 	msgs := [1]types.Message{msg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (c *Filter) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (c *Filter) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

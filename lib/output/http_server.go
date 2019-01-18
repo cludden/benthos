@@ -23,6 +23,7 @@ package output
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -66,7 +67,7 @@ type HTTPServerConfig struct {
 	Path       string `json:"path" yaml:"path"`
 	StreamPath string `json:"stream_path" yaml:"stream_path"`
 	WSPath     string `json:"ws_path" yaml:"ws_path"`
-	TimeoutMS  int64  `json:"timeout_ms" yaml:"timeout_ms"`
+	Timeout    string `json:"timeout" yaml:"timeout"`
 	CertFile   string `json:"cert_file" yaml:"cert_file"`
 	KeyFile    string `json:"key_file" yaml:"key_file"`
 }
@@ -78,7 +79,7 @@ func NewHTTPServerConfig() HTTPServerConfig {
 		Path:       "/get",
 		StreamPath: "/get/stream",
 		WSPath:     "/get/ws",
-		TimeoutMS:  5000,
+		Timeout:    "5s",
 		CertFile:   "",
 		KeyFile:    "",
 	}
@@ -94,17 +95,22 @@ type HTTPServer struct {
 	stats metrics.Type
 	log   log.Modular
 
-	mux    *http.ServeMux
-	server *http.Server
+	mux     *http.ServeMux
+	server  *http.Server
+	timeout time.Duration
 
 	transactions <-chan types.Transaction
 
 	closeChan  chan struct{}
 	closedChan chan struct{}
 
-	mRunning  metrics.StatGauge
-	mCount    metrics.StatCounter
-	mSendSucc metrics.StatCounter
+	mRunning       metrics.StatGauge
+	mCount         metrics.StatCounter
+	mPartsCount    metrics.StatCounter
+	mSendSucc      metrics.StatCounter
+	mPartsSendSucc metrics.StatCounter
+	mSent          metrics.StatCounter
+	mPartsSent     metrics.StatCounter
 
 	mGetReqRcvd  metrics.StatCounter
 	mGetCount    metrics.StatCounter
@@ -138,29 +144,40 @@ func NewHTTPServer(conf Config, mgr types.Manager, log log.Modular, stats metric
 		running:    1,
 		conf:       conf,
 		stats:      stats,
-		log:        log.NewModule(".output.http_server"),
+		log:        log,
 		mux:        mux,
 		server:     server,
 		closeChan:  make(chan struct{}),
 		closedChan: make(chan struct{}),
 
-		mRunning:      stats.GetGauge("output.http_server.running"),
-		mCount:        stats.GetCounter("output.http_server.count"),
-		mSendSucc:     stats.GetCounter("output.http_server.send.success"),
-		mGetReqRcvd:   stats.GetCounter("output.http_server.get.request.received"),
-		mGetCount:     stats.GetCounter("output.http_server.get.count"),
-		mGetSendSucc:  stats.GetCounter("output.http_server.get.send.success"),
-		mWSCount:      stats.GetCounter("output.http_server.ws.count"),
-		mWSReqRcvd:    stats.GetCounter("output.http_server.stream.request.received"),
-		mWSSendSucc:   stats.GetCounter("output.http_server.ws.send.success"),
-		mWSSendErr:    stats.GetCounter("output.http_server.ws.send.error"),
-		mStrmReqRcvd:  stats.GetCounter("output.http_server.stream.request.received"),
-		mStrmErrCast:  stats.GetCounter("output.http_server.stream.error.cast_flusher"),
-		mStrmErrWrong: stats.GetCounter("output.http_server.stream.error.wrong_method"),
-		mStrmClosed:   stats.GetCounter("output.http_server.stream.client_closed"),
-		mStrmCount:    stats.GetCounter("output.http_server.stream.count"),
-		mStrmErrWrite: stats.GetCounter("output.http_server.stream.error.write"),
-		mStrmSndSucc:  stats.GetCounter("output.http_server.stream.send.success"),
+		mRunning:       stats.GetGauge("running"),
+		mCount:         stats.GetCounter("count"),
+		mPartsCount:    stats.GetCounter("parts.count"),
+		mSendSucc:      stats.GetCounter("send.success"),
+		mPartsSendSucc: stats.GetCounter("parts.send.success"),
+		mSent:          stats.GetCounter("batch.sent"),
+		mPartsSent:     stats.GetCounter("sent"),
+		mGetReqRcvd:    stats.GetCounter("get.request.received"),
+		mGetCount:      stats.GetCounter("get.count"),
+		mGetSendSucc:   stats.GetCounter("get.send.success"),
+		mWSCount:       stats.GetCounter("ws.count"),
+		mWSReqRcvd:     stats.GetCounter("stream.request.received"),
+		mWSSendSucc:    stats.GetCounter("ws.send.success"),
+		mWSSendErr:     stats.GetCounter("ws.send.error"),
+		mStrmReqRcvd:   stats.GetCounter("stream.request.received"),
+		mStrmErrCast:   stats.GetCounter("stream.error.cast_flusher"),
+		mStrmErrWrong:  stats.GetCounter("stream.error.wrong_method"),
+		mStrmClosed:    stats.GetCounter("stream.client_closed"),
+		mStrmCount:     stats.GetCounter("stream.count"),
+		mStrmErrWrite:  stats.GetCounter("stream.error.write"),
+		mStrmSndSucc:   stats.GetCounter("stream.send.success"),
+	}
+
+	if tout := conf.HTTPServer.Timeout; len(tout) > 0 {
+		var err error
+		if h.timeout, err = time.ParseDuration(tout); err != nil {
+			return nil, fmt.Errorf("failed to parse timeout string: %v", err)
+		}
 	}
 
 	if mux != nil {
@@ -216,7 +233,6 @@ func (h *HTTPServer) getHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tStart := time.Now()
-	tOutDuration := time.Millisecond * time.Duration(h.conf.HTTPServer.TimeoutMS)
 
 	var ts types.Transaction
 	var open bool
@@ -231,7 +247,8 @@ func (h *HTTPServer) getHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		h.mGetCount.Incr(1)
 		h.mCount.Incr(1)
-	case <-time.After(tOutDuration - time.Since(tStart)):
+		h.mPartsCount.Incr(int64(ts.Payload.Len()))
+	case <-time.After(h.timeout - time.Since(tStart)):
 		http.Error(w, "Timed out waiting for message", http.StatusRequestTimeout)
 		return
 	}
@@ -258,6 +275,9 @@ func (h *HTTPServer) getHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.mSendSucc.Incr(1)
+	h.mPartsSendSucc.Incr(int64(ts.Payload.Len()))
+	h.mSent.Incr(1)
+	h.mPartsSent.Incr(int64(ts.Payload.Len()))
 	h.mGetSendSucc.Incr(1)
 
 	select {
@@ -326,6 +346,9 @@ func (h *HTTPServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 		h.mStrmSndSucc.Incr(1)
 		h.mSendSucc.Incr(1)
+		h.mPartsSendSucc.Incr(int64(ts.Payload.Len()))
+		h.mSent.Incr(1)
+		h.mPartsSent.Incr(int64(ts.Payload.Len()))
 	}
 }
 
@@ -375,6 +398,9 @@ func (h *HTTPServer) wsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			h.mWSSendSucc.Incr(1)
 			h.mSendSucc.Incr(1)
+			h.mPartsSendSucc.Incr(int64(ts.Payload.Len()))
+			h.mSent.Incr(1)
+			h.mPartsSent.Incr(int64(ts.Payload.Len()))
 		}
 
 		if werr != nil {
@@ -429,6 +455,13 @@ func (h *HTTPServer) Consume(ts <-chan types.Transaction) error {
 		}()
 	}
 	return nil
+}
+
+// Connected returns a boolean indicating whether this output is currently
+// connected to its target.
+func (h *HTTPServer) Connected() bool {
+	// Always return true as this is fuzzy right now.
+	return true
 }
 
 // CloseAsync shuts down the HTTPServer output and stops processing requests.

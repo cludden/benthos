@@ -1,7 +1,7 @@
 {
 	"http": {
 		"address": "0.0.0.0:4195",
-		"read_timeout_ms": 5000,
+		"read_timeout": "5s",
 		"root_path": "/benthos",
 		"debug_endpoints": false
 	},
@@ -12,10 +12,15 @@
 			"credentials": {
 				"id": "",
 				"role": "",
+				"role_external_id": "",
 				"secret": "",
 				"token": ""
 			},
 			"delete_objects": false,
+			"download_manager": {
+				"enabled": true
+			},
+			"endpoint": "",
 			"prefix": "",
 			"region": "eu-west-1",
 			"retries": 3,
@@ -23,7 +28,7 @@
 			"sqs_envelope_path": "",
 			"sqs_max_messages": 10,
 			"sqs_url": "",
-			"timeout_s": 5
+			"timeout": "5s"
 		}
 	},
 	"buffer": {
@@ -38,36 +43,38 @@
 		"type": "s3",
 		"s3": {
 			"bucket": "",
+			"content_type": "application/octet-stream",
 			"credentials": {
 				"id": "",
 				"role": "",
+				"role_external_id": "",
 				"secret": "",
 				"token": ""
 			},
+			"endpoint": "",
 			"path": "${!count:files}-${!timestamp_unix_nano}.txt",
 			"region": "eu-west-1",
-			"timeout_s": 5
+			"timeout": "5s"
 		}
 	},
 	"resources": {
 		"caches": {},
-		"conditions": {}
+		"conditions": {},
+		"rate_limits": {}
 	},
 	"logger": {
 		"prefix": "benthos",
 		"level": "INFO",
 		"add_timestamp": true,
-		"json_format": true
+		"json_format": true,
+		"static_fields": {
+			"@service": "benthos"
+		}
 	},
 	"metrics": {
 		"type": "http_server",
-		"prefix": "benthos",
 		"http_server": {},
-		"prometheus": {},
-		"statsd": {
-			"address": "localhost:4040",
-			"flush_period": "100ms",
-			"network": "udp"
-		}
-	}
+		"prefix": "benthos"
+	},
+	"shutdown_timeout": "20s"
 }

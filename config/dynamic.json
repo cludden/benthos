@@ -1,7 +1,7 @@
 {
 	"http": {
 		"address": "0.0.0.0:4195",
-		"read_timeout_ms": 5000,
+		"read_timeout": "5s",
 		"root_path": "/benthos",
 		"debug_endpoints": false
 	},
@@ -10,7 +10,7 @@
 		"dynamic": {
 			"inputs": {},
 			"prefix": "",
-			"timeout_ms": 5000
+			"timeout": "5s"
 		}
 	},
 	"buffer": {
@@ -26,28 +26,27 @@
 		"dynamic": {
 			"outputs": {},
 			"prefix": "",
-			"timeout_ms": 5000
+			"timeout": "5s"
 		}
 	},
 	"resources": {
 		"caches": {},
-		"conditions": {}
+		"conditions": {},
+		"rate_limits": {}
 	},
 	"logger": {
 		"prefix": "benthos",
 		"level": "INFO",
 		"add_timestamp": true,
-		"json_format": true
+		"json_format": true,
+		"static_fields": {
+			"@service": "benthos"
+		}
 	},
 	"metrics": {
 		"type": "http_server",
-		"prefix": "benthos",
 		"http_server": {},
-		"prometheus": {},
-		"statsd": {
-			"address": "localhost:4040",
-			"flush_period": "100ms",
-			"network": "udp"
-		}
-	}
+		"prefix": "benthos"
+	},
+	"shutdown_timeout": "20s"
 }

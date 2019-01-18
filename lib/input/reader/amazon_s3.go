@@ -21,7 +21,9 @@
 package reader
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"strings"
 	"time"
 
@@ -29,10 +31,9 @@ import (
 	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
 	"github.com/Jeffail/benthos/lib/types"
+	sess "github.com/Jeffail/benthos/lib/util/aws/session"
 	"github.com/Jeffail/gabs"
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
@@ -41,48 +42,43 @@ import (
 
 //------------------------------------------------------------------------------
 
-// AmazonAWSCredentialsConfig contains configuration params for AWS credentials.
-type AmazonAWSCredentialsConfig struct {
-	ID     string `json:"id" yaml:"id"`
-	Secret string `json:"secret" yaml:"secret"`
-	Token  string `json:"token" yaml:"token"`
-	Role   string `json:"role" yaml:"role"`
+// S3DownloadManagerConfig is a config struct containing fields for an S3
+// download manager.
+type S3DownloadManagerConfig struct {
+	Enabled bool `json:"enabled" yaml:"enabled"`
 }
 
 // AmazonS3Config contains configuration values for the AmazonS3 input type.
 type AmazonS3Config struct {
-	Region          string                     `json:"region" yaml:"region"`
-	Bucket          string                     `json:"bucket" yaml:"bucket"`
-	Prefix          string                     `json:"prefix" yaml:"prefix"`
-	Retries         int                        `json:"retries" yaml:"retries"`
-	DeleteObjects   bool                       `json:"delete_objects" yaml:"delete_objects"`
-	SQSURL          string                     `json:"sqs_url" yaml:"sqs_url"`
-	SQSBodyPath     string                     `json:"sqs_body_path" yaml:"sqs_body_path"`
-	SQSEnvelopePath string                     `json:"sqs_envelope_path" yaml:"sqs_envelope_path"`
-	SQSMaxMessages  int64                      `json:"sqs_max_messages" yaml:"sqs_max_messages"`
-	Credentials     AmazonAWSCredentialsConfig `json:"credentials" yaml:"credentials"`
-	TimeoutS        int64                      `json:"timeout_s" yaml:"timeout_s"`
+	sess.Config     `json:",inline" yaml:",inline"`
+	Bucket          string                  `json:"bucket" yaml:"bucket"`
+	Prefix          string                  `json:"prefix" yaml:"prefix"`
+	Retries         int                     `json:"retries" yaml:"retries"`
+	DownloadManager S3DownloadManagerConfig `json:"download_manager" yaml:"download_manager"`
+	DeleteObjects   bool                    `json:"delete_objects" yaml:"delete_objects"`
+	SQSURL          string                  `json:"sqs_url" yaml:"sqs_url"`
+	SQSBodyPath     string                  `json:"sqs_body_path" yaml:"sqs_body_path"`
+	SQSEnvelopePath string                  `json:"sqs_envelope_path" yaml:"sqs_envelope_path"`
+	SQSMaxMessages  int64                   `json:"sqs_max_messages" yaml:"sqs_max_messages"`
+	Timeout         string                  `json:"timeout" yaml:"timeout"`
 }
 
 // NewAmazonS3Config creates a new AmazonS3Config with default values.
 func NewAmazonS3Config() AmazonS3Config {
 	return AmazonS3Config{
-		Region:          "eu-west-1",
-		Bucket:          "",
-		Prefix:          "",
-		Retries:         3,
+		Config:  sess.NewConfig(),
+		Bucket:  "",
+		Prefix:  "",
+		Retries: 3,
+		DownloadManager: S3DownloadManagerConfig{
+			Enabled: true,
+		},
 		DeleteObjects:   false,
 		SQSURL:          "",
 		SQSBodyPath:     "Records.s3.object.key",
 		SQSEnvelopePath: "",
 		SQSMaxMessages:  10,
-		Credentials: AmazonAWSCredentialsConfig{
-			ID:     "",
-			Secret: "",
-			Token:  "",
-			Role:   "",
-		},
-		TimeoutS: 5,
+		Timeout:         "5s",
 	}
 }
 
@@ -105,10 +101,13 @@ type AmazonS3 struct {
 	readKeys   []objKey
 	targetKeys []objKey
 
+	readMethod func() (types.Message, error)
+
 	session    *session.Session
 	s3         *s3.S3
 	downloader *s3manager.Downloader
 	sqs        *sqs.SQS
+	timeout    time.Duration
 
 	log   log.Modular
 	stats metrics.Type
@@ -119,7 +118,7 @@ func NewAmazonS3(
 	conf AmazonS3Config,
 	log log.Modular,
 	stats metrics.Type,
-) *AmazonS3 {
+) (*AmazonS3, error) {
 	var path []string
 	if len(conf.SQSBodyPath) > 0 {
 		path = strings.Split(conf.SQSBodyPath, ".")
@@ -128,13 +127,27 @@ func NewAmazonS3(
 	if len(conf.SQSEnvelopePath) > 0 {
 		envPath = strings.Split(conf.SQSEnvelopePath, ".")
 	}
-	return &AmazonS3{
+	var timeout time.Duration
+	if tout := conf.Timeout; len(tout) > 0 {
+		var err error
+		if timeout, err = time.ParseDuration(tout); err != nil {
+			return nil, fmt.Errorf("failed to parse timeout string: %v", err)
+		}
+	}
+	s := &AmazonS3{
 		conf:        conf,
 		sqsBodyPath: path,
 		sqsEnvPath:  envPath,
-		log:         log.NewModule(".input.amazon_s3"),
+		log:         log,
 		stats:       stats,
+		timeout:     timeout,
 	}
+	if conf.DownloadManager.Enabled {
+		s.readMethod = s.readFromMgr
+	} else {
+		s.readMethod = s.read
+	}
+	return s, nil
 }
 
 // Connect attempts to establish a connection to the target S3 bucket and any
@@ -144,27 +157,9 @@ func (a *AmazonS3) Connect() error {
 		return nil
 	}
 
-	awsConf := aws.NewConfig()
-	if len(a.conf.Region) > 0 {
-		awsConf = awsConf.WithRegion(a.conf.Region)
-	}
-	if len(a.conf.Credentials.ID) > 0 {
-		awsConf = awsConf.WithCredentials(credentials.NewStaticCredentials(
-			a.conf.Credentials.ID,
-			a.conf.Credentials.Secret,
-			a.conf.Credentials.Token,
-		))
-	}
-
-	sess, err := session.NewSession(awsConf)
+	sess, err := a.conf.GetSession()
 	if err != nil {
 		return err
-	}
-
-	if len(a.conf.Credentials.Role) > 0 {
-		sess.Config = sess.Config.WithCredentials(
-			stscreds.NewCredentials(sess, a.conf.Credentials.Role),
-		)
 	}
 
 	sThree := s3.New(sess)
@@ -177,15 +172,19 @@ func (a *AmazonS3) Connect() error {
 		if len(a.conf.Prefix) > 0 {
 			listInput.Prefix = aws.String(a.conf.Prefix)
 		}
-		objList, err := sThree.ListObjects(listInput)
+		err := sThree.ListObjectsPages(listInput,
+			func(page *s3.ListObjectsOutput, isLastPage bool) bool {
+				for _, obj := range page.Contents {
+					a.targetKeys = append(a.targetKeys, objKey{
+						s3Key:    *obj.Key,
+						attempts: a.conf.Retries,
+					})
+				}
+				return true
+			},
+		)
 		if err != nil {
 			return fmt.Errorf("failed to list objects: %v", err)
-		}
-		for _, obj := range objList.Contents {
-			a.targetKeys = append(a.targetKeys, objKey{
-				s3Key:    *obj.Key,
-				attempts: a.conf.Retries,
-			})
 		}
 	} else {
 		a.sqs = sqs.New(sess)
@@ -199,13 +198,26 @@ func (a *AmazonS3) Connect() error {
 	return nil
 }
 
+func digStrsFromSlices(slice []interface{}) []string {
+	var strs []string
+	for _, v := range slice {
+		switch t := v.(type) {
+		case []interface{}:
+			strs = append(strs, digStrsFromSlices(t)...)
+		case string:
+			strs = append(strs, t)
+		}
+	}
+	return strs
+}
+
 func (a *AmazonS3) readSQSEvents() error {
 	var dudMessageHandles []*sqs.DeleteMessageBatchRequestEntry
 
 	output, err := a.sqs.ReceiveMessage(&sqs.ReceiveMessageInput{
 		QueueUrl:            aws.String(a.conf.SQSURL),
 		MaxNumberOfMessages: aws.Int64(a.conf.SQSMaxMessages),
-		WaitTimeSeconds:     aws.Int64(a.conf.TimeoutS),
+		WaitTimeSeconds:     aws.Int64(int64(a.timeout.Seconds())),
 	})
 	if err != nil {
 		return err
@@ -238,6 +250,21 @@ messageLoop:
 					a.log.Errorf("Failed to parse SQS message envelope: %v\n", err)
 					continue messageLoop
 				}
+			case []interface{}:
+				docs := []interface{}{}
+				strs := digStrsFromSlices(t)
+				for _, v := range strs {
+					var gObj2 interface{}
+					if err2 := json.Unmarshal([]byte(v), &gObj2); err2 == nil {
+						docs = append(docs, gObj2)
+					}
+				}
+				if len(docs) == 0 {
+					dudMessageHandles = append(dudMessageHandles, msgHandle)
+					a.log.Errorf("Failed to parse SQS message envelope: %v\n", err)
+					continue messageLoop
+				}
+				gObj, _ = gabs.Consume(docs)
 			default:
 				dudMessageHandles = append(dudMessageHandles, msgHandle)
 				a.log.Errorf("Unexpected envelope value: %v", t)
@@ -256,11 +283,10 @@ messageLoop:
 			}
 		case []interface{}:
 			newTargets := []string{}
-			for _, jStr := range t {
-				if p, ok := jStr.(string); ok {
-					if strings.HasPrefix(p, a.conf.Prefix) {
-						newTargets = append(newTargets, p)
-					}
+			strs := digStrsFromSlices(t)
+			for _, p := range strs {
+				if strings.HasPrefix(p, a.conf.Prefix) {
+					newTargets = append(newTargets, p)
 				}
 			}
 			if len(newTargets) == 0 {
@@ -298,8 +324,68 @@ func (a *AmazonS3) popTargetKey() {
 	a.readKeys = append(a.readKeys, target)
 }
 
-// Read attempts to read a new message from the target S3 bucket.
+// readFromMgr attempts to read a new message from the target S3 bucket.
 func (a *AmazonS3) Read() (types.Message, error) {
+	return a.readMethod()
+}
+
+// read attempts to read a new message from the target S3 bucket.
+func (a *AmazonS3) read() (types.Message, error) {
+	if a.session == nil {
+		return nil, types.ErrNotConnected
+	}
+
+	if len(a.targetKeys) == 0 {
+		if a.sqs != nil {
+			if err := a.readSQSEvents(); err != nil {
+				return nil, err
+			}
+		} else {
+			// If we aren't using SQS but exhausted our targets we are done.
+			return nil, types.ErrTypeClosed
+		}
+	}
+	if len(a.targetKeys) == 0 {
+		return nil, types.ErrTimeout
+	}
+
+	target := a.targetKeys[0]
+
+	obj, err := a.s3.GetObject(&s3.GetObjectInput{
+		Bucket: aws.String(a.conf.Bucket),
+		Key:    aws.String(target.s3Key),
+	})
+	if err != nil {
+		target.attempts--
+		if target.attempts == 0 {
+			a.popTargetKey()
+		} else {
+			a.targetKeys[0] = target
+		}
+		return nil, fmt.Errorf("failed to download file, %v", err)
+	}
+
+	a.popTargetKey()
+
+	defer obj.Body.Close()
+
+	bytes, err := ioutil.ReadAll(obj.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download file, %v", err)
+	}
+	msg := message.New([][]byte{bytes})
+	meta := msg.Get(0).Metadata()
+	for k, v := range obj.Metadata {
+		meta.Set(k, *v)
+	}
+	meta.Set("s3_key", target.s3Key)
+
+	return msg, nil
+}
+
+// readFromMgr attempts to read a new message from the target S3 bucket using a
+// download manager.
+func (a *AmazonS3) readFromMgr() (types.Message, error) {
 	if a.session == nil {
 		return nil, types.ErrNotConnected
 	}
@@ -347,16 +433,16 @@ func (a *AmazonS3) Read() (types.Message, error) {
 // Acknowledge confirms whether or not our unacknowledged messages have been
 // successfully propagated or not.
 func (a *AmazonS3) Acknowledge(err error) error {
+	var serr error
 	if err == nil {
 		deleteHandles := []*sqs.DeleteMessageBatchRequestEntry{}
 		for _, key := range a.readKeys {
 			if a.conf.DeleteObjects {
-				_, err := a.s3.DeleteObject(&s3.DeleteObjectInput{
+				if _, serr = a.s3.DeleteObject(&s3.DeleteObjectInput{
 					Bucket: aws.String(a.conf.Bucket),
 					Key:    aws.String(key.s3Key),
-				})
-				if err != nil {
-					a.log.Errorf("Failed to delete consumed object: %v\n", err)
+				}); serr != nil {
+					a.log.Errorf("Failed to delete consumed object: %v\n", serr)
 				}
 			}
 			if key.sqsHandle != nil {
@@ -364,17 +450,25 @@ func (a *AmazonS3) Acknowledge(err error) error {
 			}
 		}
 		if len(deleteHandles) > 0 {
-			a.sqs.DeleteMessageBatch(&sqs.DeleteMessageBatchInput{
+			var res *sqs.DeleteMessageBatchOutput
+			if res, serr = a.sqs.DeleteMessageBatch(&sqs.DeleteMessageBatchInput{
 				QueueUrl: aws.String(a.conf.SQSURL),
 				Entries:  deleteHandles,
-			})
+			}); serr != nil {
+				a.log.Errorf("Failed to delete consumed SQS message: %v\n", serr)
+			} else {
+				serr = fmt.Errorf("failed to delete %v consumed SQS messages", len(res.Failed))
+				for _, f := range res.Failed {
+					a.log.Errorf("Failed to delete consumed SQS message '%v', response code: %v\n", f.Id, f.Code)
+				}
+			}
 		}
 		a.readKeys = nil
 	} else {
 		a.targetKeys = append(a.readKeys, a.targetKeys...)
 		a.readKeys = nil
 	}
-	return nil
+	return serr
 }
 
 // CloseAsync begins cleaning up resources used by this reader asynchronously.

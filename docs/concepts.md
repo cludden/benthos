@@ -42,15 +42,40 @@ specific sinks.
 ## Content Based Multiplexing
 
 It is possible to perform content based multiplexing of messages to specific
-outputs using [an output broker with the `fan_out` pattern][broker-output] and a
-[filter processor][filter-processor] on each output, which is a processor
-that drops messages if the [condition][conditions] does not pass.
-[Conditions][conditions] are content aware logical operators that can be
-combined using boolean logic.
+outputs using [a switch output][switch-output] with two or more conditional
+outputs. [Conditions][conditions] are content aware logical operators that can
+be combined using boolean logic.
 
 For example, say we have an output `foo` that we only want to receive messages
 that contain the word `foo`, and an output `bar` that we wish to send everything
 that `foo` doesn't receive, we can achieve that with this config:
+
+``` yaml
+output:
+  type: switch
+  switch:
+    outputs:
+    - output:
+        type: foo
+        foo:
+          foo_field_1: value1
+      condition:
+        type: text
+        text:
+          operator: contains
+          arg: foo
+    - output:
+        type: bar
+        bar:
+          bar_field_1: value2
+```
+
+Another method of content based multiplexing is with
+[an output broker with the `fan_out` pattern][broker-output] and a
+[filter processor][filter-processor] on each output, which is a processor
+that drops messages if the [condition][conditions] does not pass.
+
+For example, the equivalent config for the previous example would be:
 
 ``` yaml
 output:
@@ -67,12 +92,10 @@ output:
           type: text
           text:
             operator: contains
-            part: 0
             arg: foo
     - type: bar
       bar:
         bar_field_1: value2
-        bar_field_2: value3
       processors:
       - type: filter
         filter:
@@ -81,11 +104,10 @@ output:
             type: text
             text:
               operator: contains
-              part: 0
               arg: foo
 ```
 
-For more information regarding filter conditions, including the full list of
+For more information regarding conditions, including the full list of
 conditions available, please [read the docs here][conditions].
 
 ## Sharing Resources Across Processors
@@ -93,8 +115,9 @@ conditions available, please [read the docs here][conditions].
 Sometimes it is advantageous to share configurations for resources such as
 caches or complex conditions between processors when they would otherwise be
 duplicated. For this purpose there is a `resource` section in a Benthos config
-where [caches][caches] and [conditions][conditions] can be configured to a label
-that is referred to by any processors/conditions that wish to use them.
+where [caches][caches], [conditions][conditions] and [rate limits][rate-limits]
+can be configured to a label that is referred to by any components that wish to
+use them.
 
 For example, let's imagine we have three inputs, two of which we wish to
 deduplicate using a shared cache. We also have two outputs, one of which only
@@ -253,7 +276,7 @@ following:
 
 Some output sinks do not support multipart messages and when receiving one will
 send each part as an individual message as a batch (the Kafka output will do
-this). You can use this to your advantage by using the `combine` processor to
+this). You can use this to your advantage by using the `batch` processor to
 create batches of messages to send.
 
 For example, given the following input and output combination:
@@ -273,9 +296,9 @@ config:
 input:
   type: foo
   processors:
-  - type: combine
-    combine:
-      parts: 8
+  - type: batch
+    batch:
+      count: 8
 output:
   type: kafka
 ```
@@ -395,10 +418,12 @@ examples.
 
 [default-conf]: ../../config/everything.yaml
 [pipeline]: ./pipeline.md
-[processors]: ./processors
-[buffers]: ./buffers
+[processors]: ./processors/README.md
+[buffers]: ./buffers/README.md
 [broker-input]: ./inputs/README.md#broker
 [broker-output]: ./outputs/README.md#broker
+[switch-output]: ./outputs/README.md#switch
 [filter-processor]: ./processors/README.md#filter
-[conditions]: ./conditions
-[caches]: ./caches
+[conditions]: ./conditions/README.md
+[caches]: ./caches/README.md
+[rate-limits]: ./rate_limits/README.md

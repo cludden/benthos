@@ -1,7 +1,28 @@
+// Copyright (c) 2018 Ashley Jeffs
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+
 package mapper
 
 import (
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/Jeffail/benthos/lib/log"
@@ -13,6 +34,7 @@ import (
 
 func TestTypeDeps(t *testing.T) {
 	expDeps := []string{
+		"",
 		"dep.1",
 		"dep.2",
 		"dep.3",
@@ -125,22 +147,22 @@ func TestTypeMapValidation(t *testing.T) {
 			passes: true,
 		},
 		{
-			name: "bad res map",
+			name: "res root then override map",
 			resMap: map[string]string{
 				"":        "baz",
 				"foo.baz": "bar",
 			},
 			reqMap: map[string]string{},
-			passes: false,
+			passes: true,
 		},
 		{
-			name: "bad res map 2",
+			name: "res target then override map",
 			resMap: map[string]string{
 				"foo.bar":     "baz",
 				"foo.bar.baz": "bar",
 			},
 			reqMap: map[string]string{},
-			passes: false,
+			passes: true,
 		},
 		{
 			name: "good res map",
@@ -153,11 +175,29 @@ func TestTypeMapValidation(t *testing.T) {
 			passes: true,
 		},
 		{
-			name:   "bad req map",
+			name:   "req root then override map",
 			resMap: map[string]string{},
 			reqMap: map[string]string{
 				"":        "baz",
 				"foo.baz": "bar",
+			},
+			passes: true,
+		},
+		{
+			name: "res root collision",
+			resMap: map[string]string{
+				"":  "baz",
+				".": "bar",
+			},
+			reqMap: map[string]string{},
+			passes: false,
+		},
+		{
+			name:   "req root collision",
+			resMap: map[string]string{},
+			reqMap: map[string]string{
+				"":  "baz",
+				".": "bar",
 			},
 			passes: false,
 		},
@@ -180,6 +220,7 @@ func TestTypeMapRequests(t *testing.T) {
 		input   [][]byte
 		output  [][]byte
 		skipped []int
+		failed  []int
 	}
 
 	tests := []testCase{
@@ -191,7 +232,8 @@ func TestTypeMapRequests(t *testing.T) {
 			output: [][]byte{
 				[]byte(`{"foo":{"bar":1}}`),
 			},
-			skipped: []int{},
+			skipped: []int(nil),
+			failed:  []int(nil),
 		},
 		{
 			name: "Single part skipped",
@@ -200,6 +242,7 @@ func TestTypeMapRequests(t *testing.T) {
 			},
 			output:  nil,
 			skipped: []int{0},
+			failed:  []int(nil),
 		},
 		{
 			name: "Single part bad json",
@@ -207,19 +250,22 @@ func TestTypeMapRequests(t *testing.T) {
 				[]byte(` 35234 keep 5$$%@#%`),
 			},
 			output:  nil,
-			skipped: []int{0},
+			skipped: []int(nil),
+			failed:  []int{0},
 		},
 		{
 			name:    "Empty",
 			input:   [][]byte{},
 			output:  nil,
-			skipped: []int{},
+			skipped: []int(nil),
+			failed:  []int(nil),
 		},
 		{
 			name:    "Empty part",
 			input:   [][]byte{[]byte(nil)},
 			output:  nil,
 			skipped: []int{0},
+			failed:  []int(nil),
 		},
 		{
 			name: "Multi parts",
@@ -231,7 +277,8 @@ func TestTypeMapRequests(t *testing.T) {
 				[]byte(`{"foo":{"bar":2}}`),
 				[]byte(`{"foo":{"bar":3}}`),
 			},
-			skipped: []int{},
+			skipped: []int(nil),
+			failed:  []int(nil),
 		},
 		{
 			name: "Multi parts some skipped",
@@ -245,6 +292,7 @@ func TestTypeMapRequests(t *testing.T) {
 				[]byte(`{"foo":{"bar":3}}`),
 			},
 			skipped: []int{1},
+			failed:  []int(nil),
 		},
 		{
 			name: "Multi parts some skipped some nil",
@@ -259,6 +307,7 @@ func TestTypeMapRequests(t *testing.T) {
 				[]byte(`{"foo":{"bar":3}}`),
 			},
 			skipped: []int{1, 3},
+			failed:  []int(nil),
 		},
 		{
 			name: "Multi parts all skipped",
@@ -269,6 +318,7 @@ func TestTypeMapRequests(t *testing.T) {
 			},
 			output:  nil,
 			skipped: []int{0, 1, 2},
+			failed:  []int(nil),
 		},
 	}
 
@@ -290,7 +340,7 @@ func TestTypeMapRequests(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		res, skipped, err := e.MapRequests(message.New(test.input))
+		res, skipped, failed := e.MapRequests(message.New(test.input))
 		if err != nil {
 			t.Errorf("Test '%v' failed: %v", test.name, err)
 			continue
@@ -298,10 +348,74 @@ func TestTypeMapRequests(t *testing.T) {
 		if act, exp := skipped, test.skipped; !reflect.DeepEqual(exp, act) {
 			t.Errorf("Wrong skipped slice for test '%v': %v != %v", test.name, act, exp)
 		}
+		if act, exp := failed, test.failed; !reflect.DeepEqual(exp, act) {
+			t.Errorf("Wrong failed slice for test '%v': %v != %v", test.name, act, exp)
+		}
 		if act, exp := message.GetAllBytes(res), test.output; !reflect.DeepEqual(exp, act) {
 			t.Errorf("Wrong output for test '%v': %s != %s", test.name, act, exp)
 		}
 	}
+}
+
+func TestMapRequestsParallel(t *testing.T) {
+	N := 100
+
+	inputMsg := message.New([][]byte{
+		[]byte(`{"foo":{"bar":"baz"}}`),
+	})
+	inputMsg.Iter(func(i int, p types.Part) error {
+		_, _ = p.JSON()
+		_ = p.Metadata()
+		return nil
+	})
+	expMsg := [][]byte{
+		[]byte(`{"new":{"bar":"baz"}}`),
+	}
+
+	wg := sync.WaitGroup{}
+	wg.Add(N)
+
+	launchChan := make(chan struct{})
+
+	for i := 0; i < N; i++ {
+		cConf := condition.NewConfig()
+		cConf.Type = "jmespath"
+		cConf.JMESPath.Query = "foo.bar == 'baz'"
+
+		cond, err := condition.New(cConf, types.NoopMgr(), log.Noop(), metrics.Noop())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		e, err := New(OptSetReqMap(map[string]string{
+			"new.bar": "foo.bar",
+		}), OptSetConditions([]types.Condition{cond}))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		go func() {
+			<-launchChan
+			defer wg.Done()
+
+			res, skipped, failed := e.MapRequests(inputMsg)
+			if err != nil {
+				t.Errorf("failed: %v", err)
+			}
+			if act, exp := failed, []int(nil); !reflect.DeepEqual(exp, act) {
+				t.Errorf("Wrong failed slice: %v != %v", act, exp)
+			}
+			if act, exp := skipped, []int(nil); !reflect.DeepEqual(exp, act) {
+				t.Errorf("Wrong skipped slice: %v != %v", act, exp)
+			}
+			if act, exp := message.GetAllBytes(res), expMsg; !reflect.DeepEqual(exp, act) {
+				t.Errorf("Wrong output: %s != %s", act, exp)
+			}
+		}()
+	}
+
+	close(launchChan)
+	wg.Wait()
 }
 
 func TestTypeAlignResult(t *testing.T) {
@@ -309,15 +423,15 @@ func TestTypeAlignResult(t *testing.T) {
 		name    string
 		length  int
 		skipped []int
+		failed  []int
 		input   [][][]byte
 		output  [][]byte
 	}
 
 	tests := []testCase{
 		{
-			name:    "single message no skipped",
-			length:  3,
-			skipped: nil,
+			name:   "single message no skipped",
+			length: 3,
 			input: [][][]byte{
 				{
 					[]byte(`foo`),
@@ -348,9 +462,44 @@ func TestTypeAlignResult(t *testing.T) {
 			},
 		},
 		{
+			name:   "single message failed",
+			length: 3,
+			failed: []int{1},
+			input: [][][]byte{
+				{
+					[]byte(`foo`),
+					[]byte(`baz`),
+				},
+			},
+			output: [][]byte{
+				[]byte(`foo`),
+				nil,
+				[]byte(`baz`),
+			},
+		},
+		{
 			name:    "single message lots skipped",
 			length:  8,
 			skipped: []int{0, 1, 2, 4, 5, 7},
+			input: [][][]byte{
+				{
+					[]byte(`foo`),
+					[]byte(`baz`),
+				},
+			},
+			output: [][]byte{
+				nil, nil, nil,
+				[]byte(`foo`),
+				nil, nil,
+				[]byte(`baz`),
+				nil,
+			},
+		},
+		{
+			name:    "single message lots skipped or failed",
+			length:  8,
+			skipped: []int{1, 4, 7},
+			failed:  []int{0, 2, 5},
 			input: [][][]byte{
 				{
 					[]byte(`foo`),
@@ -408,6 +557,27 @@ func TestTypeAlignResult(t *testing.T) {
 				nil, nil,
 			},
 		},
+		{
+			name:    "multi message lots skipped or failed",
+			length:  8,
+			skipped: []int{1, 2},
+			failed:  []int{0, 4, 6, 7},
+			input: [][][]byte{
+				{
+					[]byte(`foo`),
+				},
+				{
+					[]byte(`baz`),
+				},
+			},
+			output: [][]byte{
+				nil, nil, nil,
+				[]byte(`foo`),
+				nil,
+				[]byte(`baz`),
+				nil, nil,
+			},
+		},
 	}
 
 	e, err := New()
@@ -420,7 +590,7 @@ func TestTypeAlignResult(t *testing.T) {
 		for _, p := range test.input {
 			input = append(input, message.New(p))
 		}
-		msg, err := e.AlignResult(test.length, test.skipped, input)
+		msg, err := e.AlignResult(test.length, test.skipped, test.failed, input)
 		if err != nil {
 			t.Errorf("Error '%v': %v", test.name, err)
 			continue
@@ -440,10 +610,7 @@ func TestTypeMapRequest(t *testing.T) {
 	msg := message.New([][]byte{
 		[]byte(`{"foo":{"bar":1},"zip":"old"}`),
 	})
-	var res types.Message
-	if res, _, err = e.MapRequests(msg); err != nil {
-		t.Fatal(err)
-	}
+	res, _, _ := e.MapRequests(msg)
 	if exp, act := `{"foo":{"bar":1},"zip":"old"}`, string(res.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
@@ -458,9 +625,7 @@ func TestTypeMapRequest(t *testing.T) {
 	msg = message.New([][]byte{
 		[]byte(`{"foo":{"bar":1},"zip":"old"}`),
 	})
-	if res, _, err = e.MapRequests(msg); err != nil {
-		t.Fatal(err)
-	}
+	res, _, _ = e.MapRequests(msg)
 	if exp, act := `{"bar":1}`, string(res.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
@@ -468,12 +633,102 @@ func TestTypeMapRequest(t *testing.T) {
 	msg = message.New([][]byte{
 		[]byte(`{"zip":"old"}`),
 	})
-	var skipped []int
-	if _, skipped, err = e.MapRequests(msg); err != nil {
+	_, skipped, failed := e.MapRequests(msg)
+	if exp, act := []int(nil), skipped; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
+	}
+	if exp, act := []int{0}, failed; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
+	}
+
+	e, err = New(OptSetReqMap(map[string]string{
+		".":   "foo",
+		"bar": "baz",
+	}))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if exp, act := []int{0}, skipped; !reflect.DeepEqual(exp, act) {
+
+	msg = message.New([][]byte{
+		[]byte(`{"foo":{"bar":1,"preserve":true},"baz":"baz value"}`),
+	})
+	res, _, _ = e.MapRequests(msg)
+	if exp, act := `{"bar":"baz value","preserve":true}`, string(res.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
+	}
+
+	e, err = New(OptSetReqMap(map[string]string{
+		"foo": "",
+		"bar": "baz",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msg = message.New([][]byte{
+		[]byte(`{"foo":{"bar":1,"preserve":true},"baz":"baz value"}`),
+	})
+	res, _, _ = e.MapRequests(msg)
+	if exp, act := `{"bar":"baz value","foo":{"baz":"baz value","foo":{"bar":1,"preserve":true}}}`, string(res.Get(0).Get()); exp != act {
+		t.Errorf("Wrong result: %v != %v", act, exp)
+	}
+}
+
+func TestTypeMapRequestMetadata(t *testing.T) {
+	condConf := condition.NewConfig()
+	condConf.Type = condition.TypeText
+	condConf.Text.Operator = "contains"
+	condConf.Text.Arg = "bar"
+
+	cond, err := condition.New(condConf, nil, log.Noop(), metrics.Noop())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := New(
+		OptSetConditions([]types.Condition{cond}),
+		OptSetOptReqMap(map[string]string{
+			"test": "test",
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msg := message.New([][]byte{
+		[]byte(`{"test":"foo message"}`),
+		[]byte(`{"test":"bar message"}`),
+		[]byte(`{"test":"foo message"}`),
+		[]byte(`{"test":"baz bar message"}`),
+		[]byte(`{"test":"foo message"}`),
+	})
+	msg.Get(0).Metadata().Set("test", "foo")
+	msg.Get(1).Metadata().Set("test", "bar")
+	msg.Get(2).Metadata().Set("test", "foo")
+	msg.Get(3).Metadata().Set("test", "baz")
+	msg.Get(5).Metadata().Set("test", "foo")
+
+	res, skipped, _ := e.MapRequests(msg)
+	if exp, act := 2, res.Len(); exp != act {
+		t.Errorf("Unexpected value: %v != %v", act, exp)
+	}
+
+	if exp, act := []int{0, 2, 4}, skipped; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Unexpected value: %v != %v", act, exp)
+	}
+
+	if exp, act := `{"test":"bar message"}`, string(res.Get(0).Get()); exp != act {
+		t.Errorf("Unexpected value: %v != %v", act, exp)
+	}
+	if exp, act := `{"test":"baz bar message"}`, string(res.Get(1).Get()); exp != act {
+		t.Errorf("Unexpected value: %v != %v", act, exp)
+	}
+
+	if exp, act := "bar", res.Get(0).Metadata().Get("test"); exp != act {
+		t.Errorf("Unexpected value: %v != %v", act, exp)
+	}
+	if exp, act := "baz", res.Get(1).Metadata().Get("test"); exp != act {
+		t.Errorf("Unexpected value: %v != %v", act, exp)
 	}
 }
 
@@ -488,10 +743,7 @@ func TestTypeMapOptRequest(t *testing.T) {
 	msg := message.New([][]byte{
 		[]byte(`{"foo":{"bar":1},"zip":"old"}`),
 	})
-	var res types.Message
-	if res, _, err = e.MapRequests(msg); err != nil {
-		t.Fatal(err)
-	}
+	res, _, _ := e.MapRequests(msg)
 	if exp, act := `{"bar":1}`, string(res.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
@@ -499,9 +751,7 @@ func TestTypeMapOptRequest(t *testing.T) {
 	msg = message.New([][]byte{
 		[]byte(`{"zip":"old"}`),
 	})
-	if res, _, err = e.MapRequests(msg); err != nil {
-		t.Fatal(err)
-	}
+	res, _, _ = e.MapRequests(msg)
 	if exp, act := `{}`, string(res.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
@@ -516,9 +766,7 @@ func TestTypeMapOptRequest(t *testing.T) {
 	msg = message.New([][]byte{
 		[]byte(`{"foo":{"bar":1},"zip":"old"}`),
 	})
-	if res, _, err = e.MapRequests(msg); err != nil {
-		t.Fatal(err)
-	}
+	res, _, _ = e.MapRequests(msg)
 	if exp, act := `{"foo":{"bar":1}}`, string(res.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
@@ -539,10 +787,15 @@ func TestTypeOverlayResult(t *testing.T) {
 		[]byte(`{}`),
 	})
 	msg.Get(0).Metadata().Set("foo", "bar")
-	if err = e.MapResponses(msg, message.New([][]byte{
+
+	var failed []int
+	if failed, err = e.MapResponses(msg, message.New([][]byte{
 		[]byte(`{"foo":{"bar":1},"bar":{"baz":2}}`),
 	})); err != nil {
 		t.Fatal(err)
+	}
+	if exp, act := []int(nil), failed; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 	if exp, act := `{"bar":1,"baz":2}`, string(msg.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
@@ -557,11 +810,14 @@ func TestTypeOverlayResult(t *testing.T) {
 	})
 	msg.Get(0).Metadata().Set("foo", "bar1")
 	msg.Get(1).Metadata().Set("foo", "bar2")
-	if err = e.MapResponses(msg, message.New([][]byte{
+	if failed, err = e.MapResponses(msg, message.New([][]byte{
 		[]byte(`{"foo":{"bar":1},"bar":{"baz":2}}`),
 		[]byte(`{"foo":{"bar":3},"bar":{"baz":4},"baz":{"qux":5}}`),
 	})); err != nil {
 		t.Fatal(err)
+	}
+	if exp, act := []int(nil), failed; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 	if exp, act := `{"bar":1,"baz":2}`, string(msg.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
@@ -579,10 +835,13 @@ func TestTypeOverlayResult(t *testing.T) {
 	msg = message.New([][]byte{
 		[]byte(`{}`),
 	})
-	if err = e.MapResponses(msg, message.New([][]byte{
+	if failed, err = e.MapResponses(msg, message.New([][]byte{
 		[]byte(`not %#%$ valid json`),
 	})); err != nil {
 		t.Fatal(err)
+	}
+	if exp, act := []int{0}, failed; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 	if exp, act := `{}`, string(msg.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
@@ -591,12 +850,47 @@ func TestTypeOverlayResult(t *testing.T) {
 	msg = message.New([][]byte{
 		[]byte(`not valid json`),
 	})
-	if err = e.MapResponses(msg, message.New([][]byte{
+	if failed, err = e.MapResponses(msg, message.New([][]byte{
 		[]byte(`{}`),
 	})); err != nil {
 		t.Fatal(err)
 	}
+	if exp, act := []int{0}, failed; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
+	}
 	if exp, act := `not valid json`, string(msg.Get(0).Get()); exp != act {
+		t.Errorf("Wrong result: %v != %v", act, exp)
+	}
+
+	msg = message.New([][]byte{
+		[]byte(`{}`),
+	})
+	msg.Get(0).JSON()
+	if failed, err = e.MapResponses(msg, message.New([][]byte{
+		[]byte(`{"foo":{"bar":0},"baz":{"qux":1}}`),
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if exp, act := []int{0}, failed; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
+	}
+	if exp, act := `{}`, string(msg.Get(0).Get()); exp != act {
+		t.Errorf("Wrong result: %v != %v", act, exp)
+	}
+
+	msg = message.New([][]byte{
+		[]byte(`{}`),
+	})
+	msg.Get(0).JSON()
+	if failed, err = e.MapResponses(msg, message.New([][]byte{
+		[]byte(`{"bar":{"baz":0}},"baz":{"qux":1}}`),
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if exp, act := []int{0}, failed; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
+	}
+	if exp, act := `{}`, string(msg.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 
@@ -605,12 +899,15 @@ func TestTypeOverlayResult(t *testing.T) {
 		[]byte(`{}`),
 		[]byte(`{}`),
 	})
-	if err = e.MapResponses(msg, message.New([][]byte{
+	if failed, err = e.MapResponses(msg, message.New([][]byte{
 		[]byte(`{"foo":{"bar":1},"bar":{"baz":2}}`),
 		nil,
 		[]byte(`{"foo":{"bar":3},"bar":{"baz":4}}`),
 	})); err != nil {
 		t.Fatal(err)
+	}
+	if exp, act := []int(nil), failed; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 	if exp, act := `{"bar":1,"baz":2}`, string(msg.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
@@ -625,10 +922,13 @@ func TestTypeOverlayResult(t *testing.T) {
 	msg = message.New([][]byte{
 		[]byte(`{"bar":"old"}`),
 	})
-	if err = e.MapResponses(msg, message.New([][]byte{
+	if failed, err = e.MapResponses(msg, message.New([][]byte{
 		[]byte(`{}`),
 	})); err != nil {
 		t.Fatal(err)
+	}
+	if exp, act := []int{0}, failed; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 	if exp, act := `{"bar":"old"}`, string(msg.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
@@ -647,10 +947,15 @@ func TestTypeOverlayResultRoot(t *testing.T) {
 		[]byte(`{"this":"should be removed"}`),
 	})
 	msg.Get(0).Metadata().Set("foo", "bar1")
-	if err = e.MapResponses(msg, message.New([][]byte{
+
+	var failed []int
+	if failed, err = e.MapResponses(msg, message.New([][]byte{
 		[]byte(`{"foo":{"bar":{"new":"root"}},"bar":{"baz":2}}`),
 	})); err != nil {
 		t.Fatal(err)
+	}
+	if exp, act := []int(nil), failed; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 	if exp, act := `{"new":"root"}`, string(msg.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
@@ -669,10 +974,13 @@ func TestTypeOverlayResultRoot(t *testing.T) {
 	msg = message.New([][]byte{
 		[]byte(`{"this":"should be removed"}`),
 	})
-	if err = e.MapResponses(msg, message.New([][]byte{
+	if failed, err = e.MapResponses(msg, message.New([][]byte{
 		[]byte(`{"foo":{"bar":{"new":"root"}},"bar":{"baz":2}}`),
 	})); err != nil {
 		t.Fatal(err)
+	}
+	if exp, act := []int(nil), failed; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 	if exp, act := `{"new":"root"}`, string(msg.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
@@ -686,12 +994,15 @@ func TestTypeOverlayResultRoot(t *testing.T) {
 	msg = message.New([][]byte{
 		[]byte(`{"zip":"original"}`),
 	})
-	if err = e.MapResponses(msg, message.New([][]byte{
+	if failed, err = e.MapResponses(msg, message.New([][]byte{
 		[]byte(`{"foo":{"bar":{"new":"root"}},"bar":{"baz":2}}`),
 	})); err != nil {
 		t.Fatal(err)
 	}
-	if exp, act := `{"bar":{"baz":2},"foo":{"bar":{"new":"root"}}}`, string(msg.Get(0).Get()); exp != act {
+	if exp, act := []int(nil), failed; !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
+	}
+	if exp, act := `{"foo":{"bar":{"new":"root"}},"bar":{"baz":2}}`, string(msg.Get(0).Get()); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 }
@@ -707,10 +1018,91 @@ func TestTypeOverlayResultMisaligned(t *testing.T) {
 	msg := message.New([][]byte{
 		[]byte(`{"this":"should be removed"}`),
 	})
-	if err = e.MapResponses(msg, message.New([][]byte{
+	if _, err = e.MapResponses(msg, message.New([][]byte{
 		[]byte(`{"foo":{"bar":{"new":"root"}},"bar":{"baz":2}}`),
 		[]byte(`{"this":"should be removed"}`),
 	})); err == nil {
 		t.Error("Expected error from misaligned batches")
+	}
+}
+
+func BenchmarkMapRequests(b *testing.B) {
+	cConf := condition.NewConfig()
+	cConf.Type = "jmespath"
+	cConf.JMESPath.Query = "keys(@) == ['foo']"
+
+	cond, err := condition.New(cConf, types.NoopMgr(), log.Noop(), metrics.Noop())
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	e, err := New(OptSetReqMap(map[string]string{
+		"bar": "foo.input.stdin.delimiter",
+	}), OptSetConditions([]types.Condition{cond}))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	msg := message.New(nil)
+	for i := 0; i < b.N; i++ {
+		msg.Append(message.NewPart([]byte(`{"foo":{"http":{"address":"0.0.0.0:4195","read_timeout_ms":5000,"root_path":"/benthos","debug_endpoints":false},"input":{"type":"stdin","stdin":{"delimiter":"","max_buffer":1000000,"multipart":false}},"buffer":{"type":"none","none":{}},"pipeline":{"processors":[{"type":"process_dag","process_dag":{}}],"threads":1},"output":{"type":"stdout","stdout":{"delimiter":""}},"resources":{"caches":{},"conditions":{},"rate_limits":{}},"logger":{"prefix":"benthos","level":"INFO","add_timestamp":true,"json_format":true,"static_fields":{"@service":"benthos"}},"metrics":{"type":"http_server","prefix":"benthos","http_server":{},"prometheus":{},"statsd":{"address":"localhost:4040","flush_period":"100ms","network":"udp"}}}}`)))
+	}
+	msg.Iter(func(i int, p types.Part) error {
+		_, _ = p.JSON()
+		_ = p.Metadata()
+		return nil
+	})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	_, skipped, failed := e.MapRequests(msg)
+	if err != nil {
+		b.Errorf("failed: %v", err)
+	}
+	if act, exp := failed, []int{}; !reflect.DeepEqual(exp, act) {
+		b.Errorf("Wrong failed slice: %v != %v", act, exp)
+	}
+	if act, exp := skipped, []int{}; !reflect.DeepEqual(exp, act) {
+		b.Errorf("Wrong skipped slice: %v != %v", act, exp)
+	}
+}
+
+func BenchmarkTypeOverlayResult(b *testing.B) {
+	e, err := New(OptSetResMap(map[string]string{
+		"foo": "foo",
+		"bar": "bar",
+	}))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	msg := message.New(nil)
+	overlay := message.New(nil)
+	for i := 0; i < b.N; i++ {
+		msg.Append(message.NewPart([]byte(`{"http":{"address":"0.0.0.0:4195","read_timeout_ms":5000,"root_path":"/benthos","debug_endpoints":false},"input":{"type":"stdin","stdin":{"delimiter":"","max_buffer":1000000,"multipart":false}},"buffer":{"type":"none","none":{}},"pipeline":{"processors":[{"type":"process_dag","process_dag":{}}],"threads":1},"output":{"type":"stdout","stdout":{"delimiter":""}},"resources":{"caches":{},"conditions":{},"rate_limits":{}},"logger":{"prefix":"benthos","level":"INFO","add_timestamp":true,"json_format":true,"static_fields":{"@service":"benthos"}},"metrics":{"type":"http_server","prefix":"benthos","http_server":{},"prometheus":{},"statsd":{"address":"localhost:4040","flush_period":"100ms","network":"udp"}}}`)))
+		overlay.Append(message.NewPart([]byte(`{
+			"foo":{"http":{"address":"0.0.0.0:4195","read_timeout_ms":5000,"root_path":"/benthos","debug_endpoints":false},"input":{"type":"stdin","stdin":{"delimiter":"","max_buffer":1000000,"multipart":false}},"buffer":{"type":"none","none":{}},"pipeline":{"processors":[{"type":"process_dag","process_dag":{}}],"threads":1},"output":{"type":"stdout","stdout":{"delimiter":""}},"resources":{"caches":{},"conditions":{},"rate_limits":{}},"logger":{"prefix":"benthos","level":"INFO","add_timestamp":true,"json_format":true,"static_fields":{"@service":"benthos"}},"metrics":{"type":"http_server","prefix":"benthos","http_server":{},"prometheus":{},"statsd":{"address":"localhost:4040","flush_period":"100ms","network":"udp"}}},
+			"bar":{"http":{"address":"0.0.0.0:4195","read_timeout_ms":5000,"root_path":"/benthos","debug_endpoints":false},"input":{"type":"stdin","stdin":{"delimiter":"","max_buffer":1000000,"multipart":false}},"buffer":{"type":"none","none":{}},"pipeline":{"processors":[{"type":"process_dag","process_dag":{}}],"threads":1},"output":{"type":"stdout","stdout":{"delimiter":""}},"resources":{"caches":{},"conditions":{},"rate_limits":{}},"logger":{"prefix":"benthos","level":"INFO","add_timestamp":true,"json_format":true,"static_fields":{"@service":"benthos"}},"metrics":{"type":"http_server","prefix":"benthos","http_server":{},"prometheus":{},"statsd":{"address":"localhost:4040","flush_period":"100ms","network":"udp"}}}
+		}`)))
+	}
+
+	// Pre-marshal the documents as JSON.
+	msg.Iter(func(i int, p types.Part) error {
+		if _, err = p.JSON(); err != nil {
+			b.Fatal(err)
+		}
+		return nil
+	})
+	overlay.Iter(func(i int, p types.Part) error {
+		if _, err = p.JSON(); err != nil {
+			b.Fatal(err)
+		}
+		return nil
+	})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	if _, err = e.MapResponses(msg, overlay); err != nil {
+		b.Fatal(err)
 	}
 }

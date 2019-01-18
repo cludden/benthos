@@ -29,11 +29,14 @@ for choosing a level of resiliency that meets your needs.
 
 ## Supported Sources & Sinks
 
-- [AWS (S3, SQS, Kinesis)][aws]
+- [AWS (DynamoDB, Kinesis, S3, SQS)][aws]
 - [Elasticsearch][elasticsearch] (output only)
 - File
+- [GCP (pub/sub)][gcp]
+- [HDFS][hdfs]
 - HTTP(S)
 - [Kafka][kafka]
+- [Memcached][memcached] (output only)
 - [MQTT][mqtt]
 - [Nanomsg][nanomsg]
 - [NATS][nats]
@@ -54,7 +57,7 @@ For building your own stream processors using Benthos as a framework check out
 the [stream package][godoc-url], which also includes some examples.
 
 For some applied examples of Benthos such as streaming and deduplicating the
-Twitter firehose to Kafka [check out the cookbook section][cookbook-docs].
+Twitter firehose to Kafka [check out the examples section][examples-docs].
 
 ## Run
 
@@ -78,10 +81,20 @@ docker run --rm \
 docker run --rm -v /path/to/your/config.yaml:/benthos.yaml jeffail/benthos
 ```
 
+## Monitoring
+
+### Health Checks
+
+Benthos serves two HTTP endpoints for health checks:
+- `/ping` can be used as a liveness probe as it always returns a 200.
+- `/ready` can be used as a readiness probe as it serves a 200 only when both
+  the input and output are connected, otherwise a 503 is returned.
+
 ### Metrics
 
 Benthos [exposes lots of metrics][metrics] either to Statsd, Prometheus or for
-debugging purposes an HTTP endpoint that returns a JSON formatted object.
+debugging purposes an HTTP endpoint that returns a JSON formatted object. The
+target can be specified [via config][metrics-config].
 
 ## Configuration
 
@@ -121,20 +134,21 @@ with [a config file][env-config] where _all_ common fields can be set this way.
 
 ## Install
 
-Build with Go:
+Grab a binary for your OS from [here.][releases]
 
-``` shell
-make deps
-make
-```
-
-Or, pull the docker image:
+Or pull the docker image:
 
 ``` shell
 docker pull jeffail/benthos
 ```
 
-Or, [grab a binary for your OS from here.][releases]
+Build with Go (1.11 or later):
+
+``` shell
+git clone git@github.com:Jeffail/benthos
+cd benthos
+make
+```
 
 ### Docker Builds
 
@@ -167,6 +181,12 @@ install libzmq4 and use the compile time flag when building Benthos:
 make TAGS=ZMQ4
 ```
 
+Or to build a docker image with ZMQ support:
+
+``` shell
+make docker-zmq
+```
+
 ## Contributing
 
 Contributions are welcome, please [read the guidelines](CONTRIBUTING.md).
@@ -177,12 +197,13 @@ Contributions are welcome, please [read the guidelines](CONTRIBUTING.md).
 [outputs]: docs/outputs/README.md
 
 [metrics]: docs/metrics.md
+[metrics-config]: config/metrics.yaml#L35
 [config-interp]: docs/config_interpolation.md
 [compose-examples]: resources/docker/compose_examples
 [streams-api]: docs/api/streams.md
 [streams-mode]: docs/streams/README.md
 [general-docs]: docs/README.md
-[cookbook-docs]: docs/cookbook/README.md
+[examples-docs]: docs/examples/README.md
 [env-config]: config/env/README.md
 [config-doc]: docs/configuration.md
 
@@ -195,7 +216,6 @@ Contributions are welcome, please [read the guidelines](CONTRIBUTING.md).
 [travis-badge]: https://travis-ci.org/Jeffail/benthos.svg?branch=master
 [travis-url]: https://travis-ci.org/Jeffail/benthos
 
-[dep]: https://github.com/golang/dep
 [aws]: https://aws.amazon.com/
 [zmq]: http://zeromq.org/
 [nanomsg]: http://nanomsg.org/
@@ -207,3 +227,6 @@ Contributions are welcome, please [read the guidelines](CONTRIBUTING.md).
 [redis]: https://redis.io/
 [kafka]: https://kafka.apache.org/
 [elasticsearch]: https://www.elastic.co/
+[hdfs]: https://hadoop.apache.org/
+[gcp]: https://cloud.google.com/
+[memcached]: https://memcached.org/

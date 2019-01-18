@@ -1,6 +1,6 @@
 http:
   address: 0.0.0.0:4195
-  read_timeout_ms: 5000
+  read_timeout: 5s
   root_path: /benthos
   debug_endpoints: false
 input:
@@ -15,17 +15,19 @@ input:
     consumer_tag: benthos-consumer
     prefetch_count: 10
     prefetch_size: 0
+    max_batch_count: 1
     tls:
       enabled: false
-      cas_file: ""
+      root_cas_file: ""
       skip_cert_verify: false
+      client_certs: []
   broker:
     copies: 1
     inputs: []
   dynamic:
     inputs: {}
     prefix: ""
-    timeout_ms: 5000
+    timeout: 5s
   file:
     path: ""
     multipart: false
@@ -33,22 +35,34 @@ input:
     delimiter: ""
   files:
     path: ""
+  gcp_pubsub:
+    project: ""
+    subscription: ""
+    max_outstanding_messages: 1000
+    max_outstanding_bytes: 1000000000
+  hdfs:
+    hosts:
+    - localhost:9000
+    user: benthos_hdfs
+    directory: ""
   http_client:
     url: http://localhost:4195/get
     verb: GET
     headers:
       Content-Type: application/octet-stream
-    timeout_ms: 5000
-    retry_period_ms: 1000
-    max_retry_backoff_ms: 300000
+    rate_limit: ""
+    timeout: 5s
+    retry_period: 1s
+    max_retry_backoff: 300s
     retries: 3
     backoff_on:
     - 429
     drop_on: []
     tls:
       enabled: false
-      cas_file: ""
+      root_cas_file: ""
       skip_cert_verify: false
+      client_certs: []
     oauth:
       enabled: false
       consumer_key: ""
@@ -71,7 +85,7 @@ input:
     address: ""
     path: /post
     ws_path: /post/ws
-    timeout_ms: 5000
+    timeout: 5s
     cert_file: ""
     key_file: ""
   inproc: ""
@@ -80,43 +94,50 @@ input:
     - localhost:9092
     client_id: benthos_kafka_input
     consumer_group: benthos_consumer_group
-    commit_period_ms: 1000
+    commit_period: 1s
     topic: benthos_stream
     partition: 0
     start_from_oldest: true
     target_version: 1.0.0
+    max_batch_count: 1
     tls:
       enabled: false
-      cas_file: ""
+      root_cas_file: ""
       skip_cert_verify: false
+      client_certs: []
   kafka_balanced:
     addresses:
     - localhost:9092
     client_id: benthos_kafka_input
     consumer_group: benthos_consumer_group
-    commit_period_ms: 1000
+    commit_period: 1s
     topics:
     - benthos_stream
     start_from_oldest: true
+    target_version: 1.0.0
+    max_batch_count: 1
     tls:
       enabled: false
-      cas_file: ""
+      root_cas_file: ""
       skip_cert_verify: false
+      client_certs: []
   kinesis:
-    region: eu-west-1
     credentials:
       id: ""
       secret: ""
       token: ""
       role: ""
+      role_external_id: ""
+    endpoint: ""
+    region: eu-west-1
     limit: 100
     stream: ""
     shard: "0"
     dynamodb_table: ""
     client_id: benthos_consumer
-    commit_period_ms: 1000
+    commit_period: 1s
     start_from_oldest: true
-    timeout_ms: 5000
+    timeout: 5s
   mqtt:
     urls:
     - tcp://localhost:1883
@@ -130,12 +151,14 @@ input:
     bind: true
     socket_type: PULL
     sub_filters: []
-    poll_timeout_ms: 5000
-    reply_timeout_ms: 5000
+    poll_timeout: 5s
+    reply_timeout: 5s
   nats:
     urls:
     - nats://localhost:4222
     subject: benthos_messages
+    queue: benthos_queue
+    prefetch_count: 32
   nats_stream:
     urls:
     - nats://localhost:4222
@@ -145,6 +168,7 @@ input:
     durable_name: benthos_offset
     start_from_oldest: true
     subject: benthos_messages
+    max_inflight: 1024
   nsq:
     nsqd_tcp_addresses:
     - localhost:4150
@@ -160,6 +184,15 @@ input:
     condition:
       type: text
       and: []
+      bounds_check:
+        max_parts: 100
+        min_parts: 1
+        max_part_size: 1073741824
+        min_part_size: 1
+      check_field:
+        parts: []
+        path: ""
+        condition: {}
       count:
         arg: 100
       jmespath:
@@ -172,6 +205,8 @@ input:
         key: ""
         arg: ""
       or: []
+      processor_failed:
+        part: 0
       resource: ""
       static: true
       text:
@@ -182,7 +217,7 @@ input:
   redis_list:
     url: tcp://localhost:6379
     key: benthos_list
-    timeout_ms: 5000
+    timeout: 5s
   redis_pubsub:
     url: tcp://localhost:6379
     channels:
@@ -196,33 +231,39 @@ input:
     client_id: benthos_consumer
     limit: 10
     start_from_oldest: true
-    commit_period_ms: 1000
-    timeout_ms: 5000
+    commit_period: 1s
+    timeout: 5s
   s3:
+    credentials:
+      id: ""
+      secret: ""
+      token: ""
+      role: ""
+      role_external_id: ""
+    endpoint: ""
     region: eu-west-1
     bucket: ""
     prefix: ""
     retries: 3
+    download_manager:
+      enabled: true
     delete_objects: false
     sqs_url: ""
     sqs_body_path: Records.s3.object.key
     sqs_envelope_path: ""
     sqs_max_messages: 10
+    timeout: 5s
+  sqs:
     credentials:
       id: ""
       secret: ""
       token: ""
       role: ""
-    timeout_s: 5
-  sqs:
+      role_external_id: ""
+    endpoint: ""
     region: eu-west-1
     url: ""
-    credentials:
-      id: ""
-      secret: ""
-      token: ""
-      role: ""
-    timeout_s: 5
+    timeout: 5s
   stdin:
     multipart: false
     max_buffer: 1000000
@@ -249,7 +290,7 @@ buffer:
   mmap_file:
     directory: ""
     file_size: 262144000
-    retry_period_ms: 1000
+    retry_period: 1s
     clean_up: true
     reserved_disk_space: 104857600
   none: {}
@@ -260,11 +301,25 @@ pipeline:
     archive:
       format: binary
       path: ${!count:files}-${!timestamp_unix_nano}.txt
+    awk:
+      parts: []
+      codec: text
+      program: BEGIN { x = 0 } { print $0, x; x++ }
     batch:
-      byte_size: 10000
+      byte_size: 0
+      count: 0
       condition:
         type: static
         and: []
+        bounds_check:
+          max_parts: 100
+          min_parts: 1
+          max_part_size: 1073741824
+          min_part_size: 1
+        check_field:
+          parts: []
+          path: ""
+          condition: {}
         count:
           arg: 100
         jmespath:
@@ -277,6 +332,8 @@ pipeline:
           key: ""
           arg: ""
         or: []
+        processor_failed:
+          part: 0
         resource: ""
         static: false
         text:
@@ -284,14 +341,13 @@ pipeline:
           part: 0
           arg: ""
         xor: []
-      period_ms: 0
+      period: ""
     bounds_check:
       max_parts: 100
       min_parts: 1
       max_part_size: 1073741824
       min_part_size: 1
-    combine:
-      parts: 2
+    catch: []
     compress:
       algorithm: gzip
       level: -1
@@ -300,6 +356,15 @@ pipeline:
       condition:
         type: text
         and: []
+        bounds_check:
+          max_parts: 100
+          min_parts: 1
+          max_part_size: 1073741824
+          min_part_size: 1
+        check_field:
+          parts: []
+          path: ""
+          condition: {}
         count:
           arg: 100
         jmespath:
@@ -312,6 +377,8 @@ pipeline:
           key: ""
           arg: ""
         or: []
+        processor_failed:
+          part: 0
         resource: ""
         static: true
         text:
@@ -340,6 +407,15 @@ pipeline:
     filter:
       type: text
       and: []
+      bounds_check:
+        max_parts: 100
+        min_parts: 1
+        max_part_size: 1073741824
+        min_part_size: 1
+      check_field:
+        parts: []
+        path: ""
+        condition: {}
       count:
         arg: 100
       jmespath:
@@ -352,6 +428,8 @@ pipeline:
         key: ""
         arg: ""
       or: []
+      processor_failed:
+        part: 0
       resource: ""
       static: true
       text:
@@ -362,6 +440,15 @@ pipeline:
     filter_parts:
       type: text
       and: []
+      bounds_check:
+        max_parts: 100
+        min_parts: 1
+        max_part_size: 1073741824
+        min_part_size: 1
+      check_field:
+        parts: []
+        path: ""
+        condition: {}
       count:
         arg: 100
       jmespath:
@@ -374,6 +461,8 @@ pipeline:
         key: ""
         arg: ""
       or: []
+      processor_failed:
+        part: 0
       resource: ""
       static: true
       text:
@@ -388,6 +477,9 @@ pipeline:
       named_captures_only: true
       use_default_patterns: true
       output_format: json
+    group_by: []
+    group_by_value:
+      value: ${!metadata:example}
     hash:
       parts: []
       algorithm: sha256
@@ -402,17 +494,19 @@ pipeline:
         verb: POST
         headers:
           Content-Type: application/octet-stream
-        timeout_ms: 5000
-        retry_period_ms: 1000
-        max_retry_backoff_ms: 300000
+        rate_limit: ""
+        timeout: 5s
+        retry_period: 1s
+        max_retry_backoff: 300s
         retries: 3
         backoff_on:
         - 429
         drop_on: []
         tls:
           enabled: false
-          cas_file: ""
+          root_cas_file: ""
           skip_cert_verify: false
+          client_certs: []
         oauth:
           enabled: false
           consumer_key: ""
@@ -437,6 +531,23 @@ pipeline:
       operator: get
       path: ""
       value: ""
+    lambda:
+      credentials:
+        id: ""
+        secret: ""
+        token: ""
+        role: ""
+        role_external_id: ""
+      endpoint: ""
+      region: eu-west-1
+      function: ""
+      timeout: 5s
+      retries: 3
+      rate_limit: ""
+      parallel: false
+    log:
+      level: INFO
+      message: ""
     merge_json:
       parts: []
       retain_parts: false
@@ -450,6 +561,8 @@ pipeline:
       path: ""
       labels: {}
       value: ""
+    process_batch: []
+    process_dag: {}
     process_field:
       parts: []
       path: ""
@@ -468,13 +581,20 @@ pipeline:
     select_parts:
       parts:
       - 0
+    sleep:
+      duration: 100us
     split:
       size: 1
+    subprocess:
+      parts: []
+      name: cat
+      args: []
     text:
       parts: []
       operator: trim_space
       arg: ""
       value: ""
+    try: []
     throttle:
       period: 100us
     unarchive:
@@ -495,48 +615,98 @@ output:
     immediate: false
     tls:
       enabled: false
-      cas_file: ""
+      root_cas_file: ""
       skip_cert_verify: false
+      client_certs: []
   broker:
     copies: 1
     pattern: fan_out
     outputs: []
+  cache:
+    target: ""
+    key: ${!count:items}-${!timestamp_unix_nano}
   dynamic:
     outputs: {}
     prefix: ""
-    timeout_ms: 5000
+    timeout: 5s
+  dynamodb:
+    credentials:
+      id: ""
+      secret: ""
+      token: ""
+      role: ""
+      role_external_id: ""
+    endpoint: ""
+    region: eu-west-1
+    table: ""
+    string_columns: {}
+    ttl: ""
+    ttl_key: ""
+    max_retries: 3
+    backoff:
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 30s
   elasticsearch:
     urls:
     - http://localhost:9200
+    sniff: true
     id: ${!count:elastic_ids}-${!timestamp_unix}
     index: benthos_index
+    pipeline: ""
     type: doc
-    timeout_ms: 5000
+    timeout: 5s
     basic_auth:
       enabled: false
       username: ""
       password: ""
+    aws:
+      enabled: false
+      credentials:
+        id: ""
+        secret: ""
+        token: ""
+        role: ""
+        role_external_id: ""
+      endpoint: ""
+      region: eu-west-1
+    max_retries: 0
+    backoff:
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 30s
   file:
     path: ""
     delimiter: ""
   files:
+    path: ${!count:files}-${!timestamp_unix_nano}.txt
+  gcp_pubsub:
+    project: ""
+    topic: ""
+  hdfs:
+    hosts:
+    - localhost:9000
+    user: benthos_hdfs
+    directory: ""
     path: ${!count:files}-${!timestamp_unix_nano}.txt
   http_client:
     url: http://localhost:4195/post
     verb: POST
     headers:
       Content-Type: application/octet-stream
-    timeout_ms: 5000
-    retry_period_ms: 1000
-    max_retry_backoff_ms: 300000
+    rate_limit: ""
+    timeout: 5s
+    retry_period: 1s
+    max_retry_backoff: 300s
     retries: 3
     backoff_on:
     - 429
     drop_on: []
     tls:
       enabled: false
-      cas_file: ""
+      root_cas_file: ""
       skip_cert_verify: false
+      client_certs: []
     oauth:
       enabled: false
       consumer_key: ""
@@ -553,7 +723,7 @@ output:
     path: /get
     stream_path: /get/stream
     ws_path: /get/ws
-    timeout_ms: 5000
+    timeout: 5s
     cert_file: ""
     key_file: ""
   inproc: ""
@@ -566,23 +736,31 @@ output:
     topic: benthos_stream
     compression: none
     max_msg_bytes: 1000000
-    timeout_ms: 5000
+    timeout: 5s
     ack_replicas: false
     target_version: 1.0.0
     tls:
       enabled: false
-      cas_file: ""
+      root_cas_file: ""
       skip_cert_verify: false
+      client_certs: []
   kinesis:
-    region: eu-west-1
-    stream: ""
-    hash_key: ""
-    partition_key: ""
     credentials:
       id: ""
       secret: ""
       token: ""
       role: ""
+      role_external_id: ""
+    endpoint: ""
+    region: eu-west-1
+    stream: ""
+    hash_key: ""
+    partition_key: ""
+    max_retries: 0
+    backoff:
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 30s
   mqtt:
     urls:
     - tcp://localhost:1883
@@ -594,7 +772,7 @@ output:
     - tcp://localhost:5556
     bind: false
     socket_type: PUSH
-    poll_timeout_ms: 5000
+    poll_timeout: 5s
   nats:
     urls:
     - nats://localhost:4222
@@ -609,7 +787,6 @@ output:
     nsqd_tcp_address: localhost:4150
     topic: benthos_messages
     user_agent: benthos_producer
-    max_in_flight: 100
   redis_list:
     url: tcp://localhost:6379
     key: benthos_list
@@ -621,26 +798,45 @@ output:
     stream: benthos_stream
     body_key: body
     max_length: 0
+  retry:
+    output: {}
+    max_retries: 0
+    backoff:
+      initial_interval: 500ms
+      max_interval: 3s
+      max_elapsed_time: 0s
   s3:
+    credentials:
+      id: ""
+      secret: ""
+      token: ""
+      role: ""
+      role_external_id: ""
+    endpoint: ""
     region: eu-west-1
     bucket: ""
     path: ${!count:files}-${!timestamp_unix_nano}.txt
+    content_type: application/octet-stream
+    timeout: 5s
+  sqs:
     credentials:
       id: ""
       secret: ""
       token: ""
       role: ""
-    timeout_s: 5
-  sqs:
+      role_external_id: ""
+    endpoint: ""
     region: eu-west-1
     url: ""
-    credentials:
-      id: ""
-      secret: ""
-      token: ""
-      role: ""
+    max_retries: 0
+    backoff:
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 30s
   stdout:
     delimiter: ""
+  switch:
+    outputs: []
   websocket:
     url: ws://localhost:4195/post/ws
     oauth:
@@ -659,20 +855,55 @@ resources:
   caches:
     example:
       type: memory
+      dynamodb:
+        credentials:
+          id: ""
+          secret: ""
+          token: ""
+          role: ""
+          role_external_id: ""
+        endpoint: ""
+        region: eu-west-1
+        consistent_read: false
+        data_key: ""
+        hash_key: ""
+        table: ""
+        ttl: ""
+        ttl_key: ""
+        max_retries: 3
+        backoff:
+          initial_interval: 1s
+          max_interval: 5s
+          max_elapsed_time: 30s
       memcached:
         addresses:
         - localhost:11211
         prefix: ""
         ttl: 300
         retries: 3
-        retry_period_ms: 500
+        retry_period: 500ms
       memory:
         ttl: 300
-        compaction_interval_s: 60
+        compaction_interval: 60s
+      redis:
+        url: tcp://localhost:6379
+        prefix: ""
+        expiration: 24h
+        retries: 3
+        retry_period: 500ms
   conditions:
     example:
       type: text
       and: []
+      bounds_check:
+        max_parts: 100
+        min_parts: 1
+        max_part_size: 1073741824
+        min_part_size: 1
+      check_field:
+        parts: []
+        path: ""
+        condition: {}
       count:
         arg: 100
       jmespath:
@@ -685,6 +916,8 @@ resources:
         key: ""
         arg: ""
       or: []
+      processor_failed:
+        part: 0
       resource: ""
       static: true
       text:
@@ -692,11 +925,19 @@ resources:
         part: 0
         arg: ""
       xor: []
+  rate_limits:
+    example:
+      type: local
+      local:
+        count: 1000
+        interval: 1s
 logger:
   prefix: benthos
   level: INFO
   add_timestamp: true
   json_format: true
+  static_fields:
+    '@service': benthos
 metrics:
   type: http_server
   prefix: benthos
@@ -706,5 +947,5 @@ metrics:
     address: localhost:4040
     flush_period: 100ms
     network: udp
-sys_exit_timeout_ms: 20000
+shutdown_timeout: 20s
 

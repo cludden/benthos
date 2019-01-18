@@ -41,25 +41,27 @@ level which is only applied to messages from the baz input.
 3. [`dynamic`](#dynamic)
 4. [`file`](#file)
 5. [`files`](#files)
-6. [`http_client`](#http_client)
-7. [`http_server`](#http_server)
-8. [`inproc`](#inproc)
-9. [`kafka`](#kafka)
-10. [`kafka_balanced`](#kafka_balanced)
-11. [`kinesis`](#kinesis)
-12. [`mqtt`](#mqtt)
-13. [`nanomsg`](#nanomsg)
-14. [`nats`](#nats)
-15. [`nats_stream`](#nats_stream)
-16. [`nsq`](#nsq)
-17. [`read_until`](#read_until)
-18. [`redis_list`](#redis_list)
-19. [`redis_pubsub`](#redis_pubsub)
-20. [`redis_streams`](#redis_streams)
-21. [`s3`](#s3)
-22. [`sqs`](#sqs)
-23. [`stdin`](#stdin)
-24. [`websocket`](#websocket)
+6. [`gcp_pubsub`](#gcp_pubsub)
+7. [`hdfs`](#hdfs)
+8. [`http_client`](#http_client)
+9. [`http_server`](#http_server)
+10. [`inproc`](#inproc)
+11. [`kafka`](#kafka)
+12. [`kafka_balanced`](#kafka_balanced)
+13. [`kinesis`](#kinesis)
+14. [`mqtt`](#mqtt)
+15. [`nanomsg`](#nanomsg)
+16. [`nats`](#nats)
+17. [`nats_stream`](#nats_stream)
+18. [`nsq`](#nsq)
+19. [`read_until`](#read_until)
+20. [`redis_list`](#redis_list)
+21. [`redis_pubsub`](#redis_pubsub)
+22. [`redis_streams`](#redis_streams)
+23. [`s3`](#s3)
+24. [`sqs`](#sqs)
+25. [`stdin`](#stdin)
+26. [`websocket`](#websocket)
 
 ## `amqp`
 
@@ -68,6 +70,7 @@ type: amqp
 amqp:
   bindings_declare: []
   consumer_tag: benthos-consumer
+  max_batch_count: 1
   prefetch_count: 10
   prefetch_size: 0
   queue: benthos-queue
@@ -75,14 +78,19 @@ amqp:
     durable: true
     enabled: false
   tls:
-    cas_file: ""
+    client_certs: []
     enabled: false
+    root_cas_file: ""
     skip_cert_verify: false
   url: amqp://guest:guest@localhost:5672/
 ```
 
 Connects to an AMQP (0.91) queue. AMQP is a messaging protocol used by various
 message brokers, including RabbitMQ.
+
+The field `max_batch_count` specifies the maximum number of prefetched
+messages to be batched together. When more than one message is batched they can
+be split into individual messages with the `split` processor.
 
 It's possible for this input type to declare the target queue by setting
 `queue_declare.enabled` to `true`, if the queue already exists then
@@ -190,7 +198,7 @@ type: dynamic
 dynamic:
   inputs: {}
   prefix: ""
-  timeout_ms: 5000
+  timeout: 5s
 ```
 
 The dynamic type is a special broker type where the inputs are identified by
@@ -246,6 +254,47 @@ This input adds the following metadata fields to each message:
 You can access these metadata fields using
 [function interpolation](../config_interpolation.md#metadata).
 
+## `gcp_pubsub`
+
+``` yaml
+type: gcp_pubsub
+gcp_pubsub:
+  max_outstanding_bytes: 1e+09
+  max_outstanding_messages: 1000
+  project: ""
+  subscription: ""
+```
+
+Consumes messages from a GCP Cloud Pub/Sub subscription. Attributes from each
+message are added as metadata, which can be accessed using
+[function interpolation](../config_interpolation.md#metadata).
+
+## `hdfs`
+
+``` yaml
+type: hdfs
+hdfs:
+  directory: ""
+  hosts:
+  - localhost:9000
+  user: benthos_hdfs
+```
+
+Reads files from a HDFS directory, where each discrete file will be consumed as a single
+message payload.
+
+### Metadata
+
+This input adds the following metadata fields to each message:
+
+```
+- hdfs_name
+- hdfs_path
+```
+
+You can access these metadata fields using
+[function interpolation](../config_interpolation.md#metadata).
+
 ## `http_client`
 
 ``` yaml
@@ -260,7 +309,7 @@ http_client:
   drop_on: []
   headers:
     Content-Type: application/octet-stream
-  max_retry_backoff_ms: 300000
+  max_retry_backoff: 300s
   oauth:
     access_token: ""
     access_token_secret: ""
@@ -269,18 +318,20 @@ http_client:
     enabled: false
     request_url: ""
   payload: ""
+  rate_limit: ""
   retries: 3
-  retry_period_ms: 1000
+  retry_period: 1s
   stream:
     delimiter: ""
     enabled: false
     max_buffer: 1e+06
     multipart: false
     reconnect: true
-  timeout_ms: 5000
+  timeout: 5s
   tls:
-    cas_file: ""
+    client_certs: []
     enabled: false
+    root_cas_file: ""
     skip_cert_verify: false
   url: http://localhost:4195/get
   verb: GET
@@ -311,7 +362,7 @@ http_server:
   cert_file: ""
   key_file: ""
   path: /post
-  timeout_ms: 5000
+  timeout: 5s
   ws_path: /post/ws
 ```
 
@@ -359,14 +410,16 @@ kafka:
   addresses:
   - localhost:9092
   client_id: benthos_kafka_input
-  commit_period_ms: 1000
+  commit_period: 1s
   consumer_group: benthos_consumer_group
+  max_batch_count: 1
   partition: 0
   start_from_oldest: true
   target_version: 1.0.0
   tls:
-    cas_file: ""
+    client_certs: []
     enabled: false
+    root_cas_file: ""
     skip_cert_verify: false
   topic: benthos_stream
 ```
@@ -374,12 +427,34 @@ kafka:
 Connects to a kafka (0.8+) server. Offsets are managed within kafka as per the
 consumer group (set via config). Only one partition per input is supported, if
 you wish to balance partitions across a consumer group look at the
-'kafka_balanced' input type instead.
+`kafka_balanced` input type instead.
+
+The field `max_batch_count` specifies the maximum number of prefetched
+messages to be batched together. When more than one message is batched they can
+be split into individual messages with the `split` processor.
 
 The target version by default will be the oldest supported, as it is expected
 that the server will be backwards compatible. In order to support newer client
 features you should increase this version up to the known version of the target
 server.
+
+### TLS
+
+Custom TLS settings can be used to override system defaults. This includes
+providing a collection of root certificate authorities, providing a list of
+client certificates to use for client verification and skipping certificate
+verification.
+
+Client certificates can either be added by file or by raw contents:
+
+``` yaml
+enabled: true
+client_certs:
+  - cert_file: ./example.pem
+    key_file: ./example.key
+  - cert: foo
+    key: bar
+```
 
 ### Metadata
 
@@ -405,12 +480,15 @@ kafka_balanced:
   addresses:
   - localhost:9092
   client_id: benthos_kafka_input
-  commit_period_ms: 1000
+  commit_period: 1s
   consumer_group: benthos_consumer_group
+  max_batch_count: 1
   start_from_oldest: true
+  target_version: 1.0.0
   tls:
-    cas_file: ""
+    client_certs: []
     enabled: false
+    root_cas_file: ""
     skip_cert_verify: false
   topics:
   - benthos_stream
@@ -419,6 +497,28 @@ kafka_balanced:
 Connects to a kafka (0.9+) server. Offsets are managed within kafka as per the
 consumer group (set via config), and partitions are automatically balanced
 across any members of the consumer group.
+
+The field `max_batch_count` specifies the maximum number of prefetched
+messages to be batched together. When more than one message is batched they can
+be split into individual messages with the `split` processor.
+
+### TLS
+
+Custom TLS settings can be used to override system defaults. This includes
+providing a collection of root certificate authorities, providing a list of
+client certificates to use for client verification and skipping certificate
+verification.
+
+Client certificates can either be added by file or by raw contents:
+
+``` yaml
+enabled: true
+client_certs:
+  - cert_file: ./example.pem
+    key_file: ./example.key
+  - cert: foo
+    key: bar
+```
 
 ### Metadata
 
@@ -442,19 +542,21 @@ You can access these metadata fields using
 type: kinesis
 kinesis:
   client_id: benthos_consumer
-  commit_period_ms: 1000
+  commit_period: 1s
   credentials:
     id: ""
     role: ""
+    role_external_id: ""
     secret: ""
     token: ""
   dynamodb_table: ""
+  endpoint: ""
   limit: 100
   region: eu-west-1
   shard: "0"
   start_from_oldest: true
   stream: ""
-  timeout_ms: 5000
+  timeout: 5s
 ```
 
 Receive messages from a Kinesis stream.
@@ -500,8 +602,8 @@ You can access these metadata fields using
 type: nanomsg
 nanomsg:
   bind: true
-  poll_timeout_ms: 5000
-  reply_timeout_ms: 5000
+  poll_timeout: 5s
+  reply_timeout: 5s
   socket_type: PULL
   sub_filters: []
   urls:
@@ -518,6 +620,8 @@ Currently only PULL and SUB sockets are supported.
 ``` yaml
 type: nats
 nats:
+  prefetch_count: 32
+  queue: benthos_queue
   subject: benthos_messages
   urls:
   - nats://localhost:4222
@@ -548,6 +652,7 @@ nats_stream:
   client_id: benthos_client
   cluster_id: test-cluster
   durable_name: benthos_offset
+  max_inflight: 1024
   queue: benthos_queue
   start_from_oldest: true
   subject: benthos_messages
@@ -628,7 +733,7 @@ added to the first part of the message that triggers to input to stop.
 type: redis_list
 redis_list:
   key: benthos_list
-  timeout_ms: 5000
+  timeout: 5s
   url: tcp://localhost:6379
 ```
 
@@ -654,13 +759,13 @@ type: redis_streams
 redis_streams:
   body_key: body
   client_id: benthos_consumer
-  commit_period_ms: 1000
+  commit_period: 1s
   consumer_group: benthos_group
   limit: 10
   start_from_oldest: true
   streams:
   - benthos_stream
-  timeout_ms: 5000
+  timeout: 5s
   url: tcp://localhost:6379
 ```
 
@@ -684,9 +789,13 @@ s3:
   credentials:
     id: ""
     role: ""
+    role_external_id: ""
     secret: ""
     token: ""
   delete_objects: false
+  download_manager:
+    enabled: true
+  endpoint: ""
   prefix: ""
   region: eu-west-1
   retries: 3
@@ -694,7 +803,7 @@ s3:
   sqs_envelope_path: ""
   sqs_max_messages: 10
   sqs_url: ""
-  timeout_s: 5
+  timeout: 5s
 ```
 
 Downloads objects in an Amazon S3 bucket, optionally filtered by a prefix. If an
@@ -703,16 +812,29 @@ downloaded. Otherwise, the entire list of objects found when this input is
 created will be downloaded. Note that the prefix configuration is only used when
 downloading objects without SQS configured.
 
+If the download manager is enabled this can help speed up file downloads but
+results in file metadata not being copied.
+
 If your bucket is configured to send events directly to an SQS queue then you
-need to set the 'sqs_body_path' field to where the object key is found in the
-payload. However, it is also common practice to send bucket events to an SNS
-topic which sends enveloped events to SQS, in which case you must also set the
-'sqs_envelope_path' field to where the payload can be found.
+need to set the `sqs_body_path` field to where the object key is found
+in the payload. However, it is also common practice to send bucket events to an
+SNS topic which sends enveloped events to SQS, in which case you must also set
+the `sqs_envelope_path` field to where the payload can be found.
 
 Here is a guide for setting up an SQS queue that receives events for new S3
 bucket objects:
 
 https://docs.aws.amazon.com/AmazonS3/latest/dev/ways-to-add-notification-config-to-bucket.html
+
+WARNING: When using SQS please make sure you have sensible values for
+`sqs_max_messages` and also the visibility timeout of the queue
+itself.
+
+When Benthos consumes an S3 item as a result of receiving an SQS message the
+message is not deleted until the S3 item has been sent onwards. This ensures
+at-least-once crash resiliency, but also means that if the S3 item takes longer
+to process than the visibility timeout of your queue then the same items might
+be processed multiple times.
 
 ### Metadata
 
@@ -720,6 +842,7 @@ This input adds the following metadata fields to each message:
 
 ```
 - s3_key
+- All existing file metadata (only when NOT using download manager)
 ```
 
 You can access these metadata fields using
@@ -733,10 +856,12 @@ sqs:
   credentials:
     id: ""
     role: ""
+    role_external_id: ""
     secret: ""
     token: ""
+  endpoint: ""
   region: eu-west-1
-  timeout_s: 5
+  timeout: 5s
   url: ""
 ```
 

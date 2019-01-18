@@ -56,9 +56,10 @@ var Constructors = map[string]TypeSpec{}
 // String constants representing each processor type.
 const (
 	TypeArchive      = "archive"
+	TypeAWK          = "awk"
 	TypeBatch        = "batch"
 	TypeBoundsCheck  = "bounds_check"
-	TypeCombine      = "combine"
+	TypeCatch        = "catch"
 	TypeCompress     = "compress"
 	TypeConditional  = "conditional"
 	TypeDecode       = "decode"
@@ -68,22 +69,31 @@ const (
 	TypeFilter       = "filter"
 	TypeFilterParts  = "filter_parts"
 	TypeGrok         = "grok"
+	TypeGroupBy      = "group_by"
+	TypeGroupByValue = "group_by_value"
 	TypeHash         = "hash"
 	TypeHashSample   = "hash_sample"
 	TypeHTTP         = "http"
 	TypeInsertPart   = "insert_part"
 	TypeJMESPath     = "jmespath"
 	TypeJSON         = "json"
+	TypeLambda       = "lambda"
+	TypeLog          = "log"
 	TypeMergeJSON    = "merge_json"
 	TypeMetadata     = "metadata"
 	TypeMetric       = "metric"
 	TypeNoop         = "noop"
+	TypeProcessBatch = "process_batch"
+	TypeProcessDAG   = "process_dag"
 	TypeProcessField = "process_field"
 	TypeProcessMap   = "process_map"
 	TypeSample       = "sample"
 	TypeSelectParts  = "select_parts"
+	TypeSleep        = "sleep"
 	TypeSplit        = "split"
+	TypeSubprocess   = "subprocess"
 	TypeText         = "text"
+	TypeTry          = "try"
 	TypeThrottle     = "throttle"
 	TypeUnarchive    = "unarchive"
 )
@@ -94,9 +104,10 @@ const (
 type Config struct {
 	Type         string             `json:"type" yaml:"type"`
 	Archive      ArchiveConfig      `json:"archive" yaml:"archive"`
+	AWK          AWKConfig          `json:"awk" yaml:"awk"`
 	Batch        BatchConfig        `json:"batch" yaml:"batch"`
 	BoundsCheck  BoundsCheckConfig  `json:"bounds_check" yaml:"bounds_check"`
-	Combine      CombineConfig      `json:"combine" yaml:"combine"`
+	Catch        CatchConfig        `json:"catch" yaml:"catch"`
 	Compress     CompressConfig     `json:"compress" yaml:"compress"`
 	Conditional  ConditionalConfig  `json:"conditional" yaml:"conditional"`
 	Decode       DecodeConfig       `json:"decode" yaml:"decode"`
@@ -106,21 +117,31 @@ type Config struct {
 	Filter       FilterConfig       `json:"filter" yaml:"filter"`
 	FilterParts  FilterPartsConfig  `json:"filter_parts" yaml:"filter_parts"`
 	Grok         GrokConfig         `json:"grok" yaml:"grok"`
+	GroupBy      GroupByConfig      `json:"group_by" yaml:"group_by"`
+	GroupByValue GroupByValueConfig `json:"group_by_value" yaml:"group_by_value"`
 	Hash         HashConfig         `json:"hash" yaml:"hash"`
 	HashSample   HashSampleConfig   `json:"hash_sample" yaml:"hash_sample"`
 	HTTP         HTTPConfig         `json:"http" yaml:"http"`
 	InsertPart   InsertPartConfig   `json:"insert_part" yaml:"insert_part"`
 	JMESPath     JMESPathConfig     `json:"jmespath" yaml:"jmespath"`
 	JSON         JSONConfig         `json:"json" yaml:"json"`
+	Lambda       LambdaConfig       `json:"lambda" yaml:"lambda"`
+	Log          LogConfig          `json:"log" yaml:"log"`
 	MergeJSON    MergeJSONConfig    `json:"merge_json" yaml:"merge_json"`
 	Metadata     MetadataConfig     `json:"metadata" yaml:"metadata"`
 	Metric       MetricConfig       `json:"metric" yaml:"metric"`
+	Plugin       interface{}        `json:"plugin,omitempty" yaml:"plugin,omitempty"`
+	ProcessBatch ProcessBatchConfig `json:"process_batch" yaml:"process_batch"`
+	ProcessDAG   ProcessDAGConfig   `json:"process_dag" yaml:"process_dag"`
 	ProcessField ProcessFieldConfig `json:"process_field" yaml:"process_field"`
 	ProcessMap   ProcessMapConfig   `json:"process_map" yaml:"process_map"`
 	Sample       SampleConfig       `json:"sample" yaml:"sample"`
 	SelectParts  SelectPartsConfig  `json:"select_parts" yaml:"select_parts"`
+	Sleep        SleepConfig        `json:"sleep" yaml:"sleep"`
 	Split        SplitConfig        `json:"split" yaml:"split"`
+	Subprocess   SubprocessConfig   `json:"subprocess" yaml:"subprocess"`
 	Text         TextConfig         `json:"text" yaml:"text"`
+	Try          TryConfig          `json:"try" yaml:"try"`
 	Throttle     ThrottleConfig     `json:"throttle" yaml:"throttle"`
 	Unarchive    UnarchiveConfig    `json:"unarchive" yaml:"unarchive"`
 }
@@ -130,9 +151,10 @@ func NewConfig() Config {
 	return Config{
 		Type:         "bounds_check",
 		Archive:      NewArchiveConfig(),
+		AWK:          NewAWKConfig(),
 		Batch:        NewBatchConfig(),
 		BoundsCheck:  NewBoundsCheckConfig(),
-		Combine:      NewCombineConfig(),
+		Catch:        NewCatchConfig(),
 		Compress:     NewCompressConfig(),
 		Conditional:  NewConditionalConfig(),
 		Decode:       NewDecodeConfig(),
@@ -142,21 +164,31 @@ func NewConfig() Config {
 		Filter:       NewFilterConfig(),
 		FilterParts:  NewFilterPartsConfig(),
 		Grok:         NewGrokConfig(),
+		GroupBy:      NewGroupByConfig(),
+		GroupByValue: NewGroupByValueConfig(),
 		Hash:         NewHashConfig(),
 		HashSample:   NewHashSampleConfig(),
 		HTTP:         NewHTTPConfig(),
 		InsertPart:   NewInsertPartConfig(),
 		JMESPath:     NewJMESPathConfig(),
 		JSON:         NewJSONConfig(),
+		Lambda:       NewLambdaConfig(),
+		Log:          NewLogConfig(),
 		MergeJSON:    NewMergeJSONConfig(),
 		Metadata:     NewMetadataConfig(),
 		Metric:       NewMetricConfig(),
+		Plugin:       nil,
+		ProcessBatch: NewProcessBatchConfig(),
+		ProcessDAG:   NewProcessDAGConfig(),
 		ProcessField: NewProcessFieldConfig(),
 		ProcessMap:   NewProcessMapConfig(),
 		Sample:       NewSampleConfig(),
 		SelectParts:  NewSelectPartsConfig(),
+		Sleep:        NewSleepConfig(),
 		Split:        NewSplitConfig(),
+		Subprocess:   NewSubprocessConfig(),
 		Text:         NewTextConfig(),
+		Try:          NewTryConfig(),
 		Throttle:     NewThrottleConfig(),
 		Unarchive:    NewUnarchiveConfig(),
 	}
@@ -182,7 +214,16 @@ func SanitiseConfig(conf Config) (interface{}, error) {
 			return nil, err
 		}
 	} else {
-		outputMap[conf.Type] = hashMap[conf.Type]
+		if _, exists := hashMap[conf.Type]; exists {
+			outputMap[conf.Type] = hashMap[conf.Type]
+		}
+		if spec, exists := pluginSpecs[conf.Type]; exists {
+			if spec.confSanitiser != nil {
+				outputMap["plugin"] = spec.confSanitiser(conf.Plugin)
+			} else {
+				outputMap["plugin"] = hashMap["plugin"]
+			}
+		}
 	}
 
 	return outputMap, nil
@@ -200,6 +241,20 @@ func (m *Config) UnmarshalJSON(bytes []byte) error {
 		return err
 	}
 
+	if spec, exists := pluginSpecs[aliased.Type]; exists {
+		dummy := struct {
+			Conf interface{} `json:"plugin"`
+		}{
+			Conf: spec.confConstructor(),
+		}
+		if err := json.Unmarshal(bytes, &dummy); err != nil {
+			return fmt.Errorf("failed to parse plugin config: %v", err)
+		}
+		aliased.Plugin = dummy.Conf
+	} else {
+		aliased.Plugin = nil
+	}
+
 	*m = Config(aliased)
 	return nil
 }
@@ -212,6 +267,21 @@ func (m *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 	if err := unmarshal(&aliased); err != nil {
 		return err
+	}
+
+	if spec, exists := pluginSpecs[aliased.Type]; exists {
+		confBytes, err := yaml.Marshal(aliased.Plugin)
+		if err != nil {
+			return err
+		}
+
+		conf := spec.confConstructor()
+		if err = yaml.Unmarshal(confBytes, conf); err != nil {
+			return err
+		}
+		aliased.Plugin = conf
+	} else {
+		aliased.Plugin = nil
 	}
 
 	*m = Config(aliased)
@@ -234,11 +304,17 @@ specific output (set in the output section).
 By organising processors you can configure complex behaviours in your pipeline.
 You can [find some examples here][0].
 
+### Error Handling
+
+Some processors have conditions whereby they might fail. Benthos has mechanisms
+for detecting and recovering from these failures which can be read about
+[here](../error_handling.md).
+
 ### Batching and Multiple Part Messages
 
 All Benthos processors support multiple part messages, which are synonymous with
-batches. Some processors such as [combine](#combine), [batch](#batch) and
-[split](#split) are able to create, expand and break down batches.
+batches. Some processors such as [batch](#batch) and [split](#split) are able to
+create, expand and break down batches.
 
 Many processors are able to perform their behaviours on specific parts of a
 message batch, or on all parts, and have a field ` + "`parts`" + ` for
@@ -248,10 +324,15 @@ parts is empty these processors will be applied to all message parts.
 Part indexes can be negative, and if so the part will be selected from the end
 counting backwards starting from -1. E.g. if part = -1 then the selected part
 will be the last part of the message, if part = -2 then the part before the last
-element will be selected, and so on.`
+element will be selected, and so on.
+
+Some processors such as ` + "`filter` and `dedupe`" + ` act across an entire
+batch, when instead we'd like to perform them on individual messages of a batch.
+In this case the ` + "[`process_batch`](#process_batch)" + ` processor can be
+used.`
 
 var footer = `
-[0]: ./examples.md`
+[0]: ../examples/README.md`
 
 // Descriptions returns a formatted string of collated descriptions of each
 // type.
@@ -313,6 +394,9 @@ func New(
 ) (Type, error) {
 	if c, ok := Constructors[conf.Type]; ok {
 		return c.constructor(conf, mgr, log, stats)
+	}
+	if c, ok := pluginSpecs[conf.Type]; ok {
+		return c.constructor(conf.Plugin, mgr, log, stats)
 	}
 	return nil, types.ErrInvalidProcessorType
 }

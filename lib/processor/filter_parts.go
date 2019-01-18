@@ -22,6 +22,7 @@ package processor
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/message"
@@ -37,15 +38,17 @@ func init() {
 	Constructors[TypeFilterParts] = TypeSpec{
 		constructor: NewFilterParts,
 		description: `
-Tests each individual part of a message batch against a condition, if the
-condition fails then the part is dropped. If the resulting batch is empty it
-will be dropped. You can find a [full list of conditions here](../conditions),
-in this case each condition will be applied to a part as if it were a single
-part message.
+Tests each individual message of a batch against a condition, if the condition
+fails then the message is dropped. If the resulting batch is empty it will be
+dropped. You can find a [full list of conditions here](../conditions), in this
+case each condition will be applied to a message as if it were a single message
+batch.
 
 This processor is useful if you are combining messages into batches using the
-` + "[`combine`](#combine) or [`batch`](#batch)" + ` processors and wish to
-remove specific parts.`,
+` + "[`batch`](#batch)" + ` processor and wish to remove specific parts.`,
+		sanitiseConfigFunc: func(conf Config) (interface{}, error) {
+			return condition.SanitiseConfig(conf.FilterParts.Config)
+		},
 	}
 }
 
@@ -74,20 +77,17 @@ type FilterParts struct {
 
 	condition condition.Type
 
-	mCount       metrics.StatCounter
-	mPartDropped metrics.StatCounter
-	mDropped     metrics.StatCounter
-	mSent        metrics.StatCounter
-	mSentParts   metrics.StatCounter
+	mCount     metrics.StatCounter
+	mDropped   metrics.StatCounter
+	mSent      metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewFilterParts returns a FilterParts processor.
 func NewFilterParts(
 	conf Config, mgr types.Manager, log log.Modular, stats metrics.Type,
 ) (Type, error) {
-	nsLog := log.NewModule(".processor.filter_parts")
-	nsStats := metrics.Namespaced(stats, "processor.filter_parts")
-	cond, err := condition.New(conf.FilterParts.Config, mgr, nsLog, nsStats)
+	cond, err := condition.New(conf.FilterParts.Config, mgr, log, stats)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to construct condition '%v': %v",
@@ -95,15 +95,14 @@ func NewFilterParts(
 		)
 	}
 	return &FilterParts{
-		log:       nsLog,
+		log:       log,
 		stats:     stats,
 		condition: cond,
 
-		mCount:       stats.GetCounter("processor.filter_parts.count"),
-		mPartDropped: stats.GetCounter("processor.filter_parts.part.dropped"),
-		mDropped:     stats.GetCounter("processor.filter_parts.dropped"),
-		mSent:        stats.GetCounter("processor.filter_parts.sent"),
-		mSentParts:   stats.GetCounter("processor.filter_parts.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mDropped:   stats.GetCounter("dropped"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -120,18 +119,26 @@ func (c *FilterParts) ProcessMessage(msg types.Message) ([]types.Message, types.
 		if c.condition.Check(message.Lock(msg, i)) {
 			newMsg.Append(msg.Get(i).Copy())
 		} else {
-			c.mPartDropped.Incr(1)
+			c.mDropped.Incr(1)
 		}
 	}
 	if newMsg.Len() > 0 {
-		c.mSent.Incr(1)
-		c.mSentParts.Incr(int64(newMsg.Len()))
+		c.mBatchSent.Incr(1)
+		c.mSent.Incr(int64(newMsg.Len()))
 		msgs := [1]types.Message{newMsg}
 		return msgs[:], nil
 	}
 
-	c.mDropped.Incr(1)
 	return nil, response.NewAck()
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (c *FilterParts) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (c *FilterParts) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

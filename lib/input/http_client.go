@@ -126,7 +126,7 @@ func NewHTTPClient(conf Config, mgr types.Manager, log log.Modular, stats metric
 	h := HTTPClient{
 		running:      1,
 		stats:        stats,
-		log:          log.NewModule(".input.http_client"),
+		log:          log,
 		conf:         conf,
 		buffer:       &bytes.Buffer{},
 		transactions: make(chan types.Transaction),
@@ -136,7 +136,7 @@ func NewHTTPClient(conf Config, mgr types.Manager, log log.Modular, stats metric
 
 	if h.conf.HTTPClient.Stream.Enabled {
 		// Timeout should be left at zero if we are streaming.
-		h.conf.HTTPClient.TimeoutMS = 0
+		h.conf.HTTPClient.Timeout = ""
 	}
 	if len(h.conf.HTTPClient.Payload) > 0 {
 		h.payload = message.New([][]byte{[]byte(h.conf.HTTPClient.Payload)})
@@ -147,7 +147,8 @@ func NewHTTPClient(conf Config, mgr types.Manager, log log.Modular, stats metric
 		h.conf.HTTPClient.Config,
 		client.OptSetCloseChan(h.closeChan),
 		client.OptSetLogger(h.log),
-		client.OptSetStats(metrics.Namespaced(h.stats, "input.http_client")),
+		client.OptSetManager(mgr),
+		client.OptSetStats(metrics.Namespaced(h.stats, "client")),
 	); err != nil {
 		return nil, err
 	}
@@ -169,9 +170,9 @@ func NewHTTPClient(conf Config, mgr types.Manager, log log.Modular, stats metric
 	conn := false
 
 	var (
-		mStrmConstructor = h.stats.GetCounter("input.http_client.stream.constructor")
-		mStrmReqErr      = h.stats.GetCounter("input.http_client.stream.request.error")
-		mStrnOnClose     = h.stats.GetCounter("input.http_client.stream.on_close")
+		mStrmConstructor = h.stats.GetCounter("stream.constructor")
+		mStrmReqErr      = h.stats.GetCounter("stream.request.error")
+		mStrnOnClose     = h.stats.GetCounter("stream.on_close")
 	)
 
 	rdr, err := reader.NewLines(
@@ -259,14 +260,17 @@ func (h *HTTPClient) parseResponse(res *http.Response) (types.Message, error) {
 // POST requests.
 func (h *HTTPClient) loop() {
 	var (
-		mRunning     = h.stats.GetGauge("input.http_client.running")
-		mReqTimedOut = h.stats.GetCounter("input.http_client.request.timed_out")
-		mReqErr      = h.stats.GetCounter("input.http_client.request.error")
-		mReqParseErr = h.stats.GetCounter("input.http_client.request.parse.error")
-		mReqSucc     = h.stats.GetCounter("input.http_client.request.success")
-		mCount       = h.stats.GetCounter("input.http_client.count")
-		mSendErr     = h.stats.GetCounter("input.http_client.send.error")
-		mSendSucc    = h.stats.GetCounter("input.http_client.send.success")
+		mRunning     = h.stats.GetGauge("running")
+		mRcvd        = h.stats.GetCounter("batch.received")
+		mPartsRcvd   = h.stats.GetCounter("received")
+		mReqTimedOut = h.stats.GetCounter("request.timed_out")
+		mReqErr      = h.stats.GetCounter("request.error")
+		mReqParseErr = h.stats.GetCounter("request.parse.error")
+		mReqSucc     = h.stats.GetCounter("request.success")
+		mCount       = h.stats.GetCounter("count")
+		mPartsCount  = h.stats.GetCounter("parts.count")
+		mSendErr     = h.stats.GetCounter("send.error")
+		mSendSucc    = h.stats.GetCounter("send.success")
 	)
 
 	defer func() {
@@ -305,7 +309,13 @@ func (h *HTTPClient) loop() {
 				}
 				res.Body.Close()
 			}
-			mCount.Incr(1)
+
+			if msgOut != nil {
+				mCount.Incr(1)
+				mPartsCount.Incr(int64(msgOut.Len()))
+				mRcvd.Incr(1)
+				mPartsRcvd.Incr(int64(msgOut.Len()))
+			}
 		}
 
 		if msgOut != nil {
@@ -336,6 +346,12 @@ func (h *HTTPClient) loop() {
 // this input type.
 func (h *HTTPClient) TransactionChan() <-chan types.Transaction {
 	return h.transactions
+}
+
+// Connected returns a boolean indicating whether this input is currently
+// connected to its target.
+func (h *HTTPClient) Connected() bool {
+	return true
 }
 
 // CloseAsync shuts down the HTTPClient input.

@@ -38,6 +38,10 @@ type Cache interface {
 	// fails.
 	Set(key string, value []byte) error
 
+	// SetMulti attempts to set the value of multiple keys, returns an error if
+	// any of the keys fail.
+	SetMulti(items map[string][]byte) error
+
 	// Add attempts to set the value of a key only if the key does not already
 	// exist, returns an error if the key already exists or if the command
 	// fails.
@@ -45,6 +49,18 @@ type Cache interface {
 
 	// Delete attempts to remove a key. Returns an error if a failure occurs.
 	Delete(key string) error
+}
+
+//------------------------------------------------------------------------------
+
+// RateLimit is a strategy for limiting access to a shared resource, this
+// strategy can be safely used by components in parallel.
+type RateLimit interface {
+	// Access the rate limited resource. Returns a duration or an error if the
+	// rate limit check fails. The returned duration is either zero (meaning the
+	// resource may be accessed) or a reasonable length of time to wait before
+	// requesting again.
+	Access() (time.Duration, error)
 }
 
 //------------------------------------------------------------------------------
@@ -66,6 +82,8 @@ type Processor interface {
 	// response in case of failure. If the slice of messages is empty the
 	// response will be returned to the source.
 	ProcessMessage(Message) ([]Message, Response)
+
+	Closable
 }
 
 //------------------------------------------------------------------------------
@@ -82,6 +100,9 @@ type Manager interface {
 
 	// GetCondition attempts to find a service wide condition by its name.
 	GetCondition(name string) (Condition, error)
+
+	// GetRateLimit attempts to find a service wide rate limit by its name.
+	GetRateLimit(name string) (RateLimit, error)
 
 	// GetPipe attempts to find a service wide transaction chan by its name.
 	GetPipe(name string) (<-chan Transaction, error)
@@ -130,12 +151,20 @@ type Consumer interface {
 type Output interface {
 	Consumer
 	Closable
+
+	// Connected returns a boolean indicating whether this output is currently
+	// connected to its target.
+	Connected() bool
 }
 
 // Input is a closable Producer.
 type Input interface {
 	Producer
 	Closable
+
+	// Connected returns a boolean indicating whether this input is currently
+	// connected to its target.
+	Connected() bool
 }
 
 // Pipeline is an interface that implements both the Consumer and Producer
@@ -157,7 +186,12 @@ type ProcessorConstructorFunc func() (Processor, error)
 // PipelineConstructorFunc is a constructor to be called for each parallel
 // stream pipeline thread in order to construct a custom pipeline
 // implementation.
-type PipelineConstructorFunc func() (Pipeline, error)
+//
+// An integer pointer is provided to pipeline constructors that tracks the
+// number of components spanning multiple pipelines. Each pipeline is expected
+// to increment i by the number of components they contain, and may use the
+// value for metric and logging namespacing.
+type PipelineConstructorFunc func(i *int) (Pipeline, error)
 
 //------------------------------------------------------------------------------
 

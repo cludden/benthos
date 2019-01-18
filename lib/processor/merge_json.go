@@ -21,6 +21,8 @@
 package processor
 
 import (
+	"time"
+
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -34,11 +36,11 @@ func init() {
 	Constructors[TypeMergeJSON] = TypeSpec{
 		constructor: NewMergeJSON,
 		description: `
-Parses selected message parts as JSON documents, attempts to merge them into one
-single JSON document and then writes it to a new message part at the end of the
-message. Merged parts are removed unless ` + "`retain_parts`" + ` is set to
-true. The new merged message part will contain the metadata of the first part to
-be merged.`,
+Parses selected messages of a batch as JSON documents, attempts to merge them
+into one single JSON document and then writes it to a new message at the end of
+the batch. Merged parts are removed unless ` + "`retain_parts`" + ` is set to
+true. The new merged message will contain the metadata of the first part to be
+merged.`,
 	}
 }
 
@@ -72,9 +74,9 @@ type MergeJSON struct {
 	mCount     metrics.StatCounter
 	mErrJSONP  metrics.StatCounter
 	mErrJSONS  metrics.StatCounter
-	mSucc      metrics.StatCounter
+	mErr       metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewMergeJSON returns a MergeJSON processor.
@@ -84,15 +86,15 @@ func NewMergeJSON(
 	j := &MergeJSON{
 		parts:  conf.MergeJSON.Parts,
 		retain: conf.MergeJSON.RetainParts,
-		log:    log.NewModule(".processor.merge_json"),
+		log:    log,
 		stats:  stats,
 
-		mCount:     stats.GetCounter("processor.merge_json.count"),
-		mErrJSONP:  stats.GetCounter("processor.merge_json.error.json_parse"),
-		mErrJSONS:  stats.GetCounter("processor.merge_json.error.json_set"),
-		mSucc:      stats.GetCounter("processor.merge_json.success"),
-		mSent:      stats.GetCounter("processor.merge_json.sent"),
-		mSentParts: stats.GetCounter("processor.merge_json.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErrJSONP:  stats.GetCounter("error.json_parse"),
+		mErrJSONS:  stats.GetCounter("error.json_set"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}
 	return j, nil
 }
@@ -109,6 +111,7 @@ func (p *MergeJSON) ProcessMessage(msg types.Message) ([]types.Message, types.Re
 		jsonPart, err := msg.Get(index).JSON()
 		if err != nil {
 			p.mErrJSONP.Incr(1)
+			p.mErr.Incr(1)
 			p.log.Debugf("Failed to parse part into json: %v\n", err)
 			return
 		}
@@ -116,6 +119,7 @@ func (p *MergeJSON) ProcessMessage(msg types.Message) ([]types.Message, types.Re
 		var gPart *gabs.Container
 		if gPart, err = gabs.Consume(jsonPart); err != nil {
 			p.mErrJSONP.Incr(1)
+			p.mErr.Incr(1)
 			p.log.Debugf("Failed to parse part into json: %v\n", err)
 			return
 		}
@@ -161,17 +165,25 @@ func (p *MergeJSON) ProcessMessage(msg types.Message) ([]types.Message, types.Re
 	i := newMsg.Append(message.NewPart(nil))
 	if err := newMsg.Get(i).SetJSON(newPart.Data()); err != nil {
 		p.mErrJSONS.Incr(1)
+		p.mErr.Incr(1)
 		p.log.Debugf("Failed to marshal merged part into json: %v\n", err)
-	} else {
-		p.mSucc.Incr(1)
 	}
 	newMsg.Get(i).SetMetadata(firstMetadata)
 
 	msgs := [1]types.Message{newMsg}
 
-	p.mSent.Incr(1)
-	p.mSentParts.Incr(int64(newMsg.Len()))
+	p.mBatchSent.Incr(1)
+	p.mSent.Incr(int64(newMsg.Len()))
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (p *MergeJSON) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (p *MergeJSON) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

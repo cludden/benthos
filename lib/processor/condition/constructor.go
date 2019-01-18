@@ -55,49 +55,60 @@ var Constructors = map[string]TypeSpec{}
 
 // String constants representing each condition type.
 var (
-	TypeAnd      = "and"
-	TypeCount    = "count"
-	TypeJMESPath = "jmespath"
-	TypeNot      = "not"
-	TypeMetadata = "metadata"
-	TypeOr       = "or"
-	TypeResource = "resource"
-	TypeStatic   = "static"
-	TypeText     = "text"
-	TypeXor      = "xor"
+	TypeAnd             = "and"
+	TypeBoundsCheck     = "bounds_check"
+	TypeCheckField      = "check_field"
+	TypeCount           = "count"
+	TypeJMESPath        = "jmespath"
+	TypeNot             = "not"
+	TypeMetadata        = "metadata"
+	TypeOr              = "or"
+	TypeProcessorFailed = "processor_failed"
+	TypeResource        = "resource"
+	TypeStatic          = "static"
+	TypeText            = "text"
+	TypeXor             = "xor"
 )
 
 //------------------------------------------------------------------------------
 
 // Config is the all encompassing configuration struct for all condition types.
 type Config struct {
-	Type     string         `json:"type" yaml:"type"`
-	And      AndConfig      `json:"and" yaml:"and"`
-	Count    CountConfig    `json:"count" yaml:"count"`
-	JMESPath JMESPathConfig `json:"jmespath" yaml:"jmespath"`
-	Not      NotConfig      `json:"not" yaml:"not"`
-	Metadata MetadataConfig `json:"metadata" yaml:"metadata"`
-	Or       OrConfig       `json:"or" yaml:"or"`
-	Resource string         `json:"resource" yaml:"resource"`
-	Static   bool           `json:"static" yaml:"static"`
-	Text     TextConfig     `json:"text" yaml:"text"`
-	Xor      XorConfig      `json:"xor" yaml:"xor"`
+	Type            string                `json:"type" yaml:"type"`
+	And             AndConfig             `json:"and" yaml:"and"`
+	BoundsCheck     BoundsCheckConfig     `json:"bounds_check" yaml:"bounds_check"`
+	CheckField      CheckFieldConfig      `json:"check_field" yaml:"check_field"`
+	Count           CountConfig           `json:"count" yaml:"count"`
+	JMESPath        JMESPathConfig        `json:"jmespath" yaml:"jmespath"`
+	Not             NotConfig             `json:"not" yaml:"not"`
+	Metadata        MetadataConfig        `json:"metadata" yaml:"metadata"`
+	Or              OrConfig              `json:"or" yaml:"or"`
+	Plugin          interface{}           `json:"plugin,omitempty" yaml:"plugin,omitempty"`
+	ProcessorFailed ProcessorFailedConfig `json:"processor_failed" yaml:"processor_failed"`
+	Resource        string                `json:"resource" yaml:"resource"`
+	Static          bool                  `json:"static" yaml:"static"`
+	Text            TextConfig            `json:"text" yaml:"text"`
+	Xor             XorConfig             `json:"xor" yaml:"xor"`
 }
 
 // NewConfig returns a configuration struct fully populated with default values.
 func NewConfig() Config {
 	return Config{
-		Type:     "text",
-		And:      NewAndConfig(),
-		Count:    NewCountConfig(),
-		JMESPath: NewJMESPathConfig(),
-		Not:      NewNotConfig(),
-		Metadata: NewMetadataConfig(),
-		Or:       NewOrConfig(),
-		Resource: "",
-		Static:   true,
-		Text:     NewTextConfig(),
-		Xor:      NewXorConfig(),
+		Type:            "text",
+		And:             NewAndConfig(),
+		BoundsCheck:     NewBoundsCheckConfig(),
+		CheckField:      NewCheckFieldConfig(),
+		Count:           NewCountConfig(),
+		JMESPath:        NewJMESPathConfig(),
+		Not:             NewNotConfig(),
+		Metadata:        NewMetadataConfig(),
+		Or:              NewOrConfig(),
+		Plugin:          nil,
+		ProcessorFailed: NewProcessorFailedConfig(),
+		Resource:        "",
+		Static:          true,
+		Text:            NewTextConfig(),
+		Xor:             NewXorConfig(),
 	}
 }
 
@@ -121,7 +132,16 @@ func SanitiseConfig(conf Config) (interface{}, error) {
 			return nil, err
 		}
 	} else {
-		outputMap[conf.Type] = hashMap[conf.Type]
+		if _, exists := hashMap[conf.Type]; exists {
+			outputMap[conf.Type] = hashMap[conf.Type]
+		}
+		if spec, exists := pluginSpecs[conf.Type]; exists {
+			if spec.confSanitiser != nil {
+				outputMap["plugin"] = spec.confSanitiser(conf.Plugin)
+			} else {
+				outputMap["plugin"] = hashMap["plugin"]
+			}
+		}
 	}
 
 	return outputMap, nil
@@ -139,6 +159,20 @@ func (m *Config) UnmarshalJSON(bytes []byte) error {
 		return err
 	}
 
+	if spec, exists := pluginSpecs[aliased.Type]; exists {
+		dummy := struct {
+			Conf interface{} `json:"plugin"`
+		}{
+			Conf: spec.confConstructor(),
+		}
+		if err := json.Unmarshal(bytes, &dummy); err != nil {
+			return fmt.Errorf("failed to parse plugin config: %v", err)
+		}
+		aliased.Plugin = dummy.Conf
+	} else {
+		aliased.Plugin = nil
+	}
+
 	*m = Config(aliased)
 	return nil
 }
@@ -151,6 +185,21 @@ func (m *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 	if err := unmarshal(&aliased); err != nil {
 		return err
+	}
+
+	if spec, exists := pluginSpecs[aliased.Type]; exists {
+		confBytes, err := yaml.Marshal(aliased.Plugin)
+		if err != nil {
+			return err
+		}
+
+		conf := spec.confConstructor()
+		if err = yaml.Unmarshal(confBytes, conf); err != nil {
+			return err
+		}
+		aliased.Plugin = conf
+	} else {
+		aliased.Plugin = nil
 	}
 
 	*m = Config(aliased)
@@ -297,7 +346,10 @@ func Descriptions() string {
 // New creates a condition type based on a condition configuration.
 func New(conf Config, mgr types.Manager, log log.Modular, stats metrics.Type) (Type, error) {
 	if c, ok := Constructors[conf.Type]; ok {
-		return c.constructor(conf, mgr, log, stats)
+		return c.constructor(conf, mgr, log.NewModule("."+conf.Type), stats)
+	}
+	if c, ok := pluginSpecs[conf.Type]; ok {
+		return c.constructor(conf.Plugin, mgr, log.NewModule("."+conf.Type), stats)
 	}
 	return nil, types.ErrInvalidConditionType
 }

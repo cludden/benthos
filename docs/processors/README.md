@@ -15,11 +15,17 @@ specific output (set in the output section).
 By organising processors you can configure complex behaviours in your pipeline.
 You can [find some examples here][0].
 
+### Error Handling
+
+Some processors have conditions whereby they might fail. Benthos has mechanisms
+for detecting and recovering from these failures which can be read about
+[here](../error_handling.md).
+
 ### Batching and Multiple Part Messages
 
 All Benthos processors support multiple part messages, which are synonymous with
-batches. Some processors such as [combine](#combine), [batch](#batch) and
-[split](#split) are able to create, expand and break down batches.
+batches. Some processors such as [batch](#batch) and [split](#split) are able to
+create, expand and break down batches.
 
 Many processors are able to perform their behaviours on specific parts of a
 message batch, or on all parts, and have a field `parts` for
@@ -31,39 +37,54 @@ counting backwards starting from -1. E.g. if part = -1 then the selected part
 will be the last part of the message, if part = -2 then the part before the last
 element will be selected, and so on.
 
+Some processors such as `filter` and `dedupe` act across an entire
+batch, when instead we'd like to perform them on individual messages of a batch.
+In this case the [`process_batch`](#process_batch) processor can be
+used.
+
 ### Contents
 
 1. [`archive`](#archive)
-2. [`batch`](#batch)
-3. [`bounds_check`](#bounds_check)
-4. [`combine`](#combine)
-5. [`compress`](#compress)
-6. [`conditional`](#conditional)
-7. [`decode`](#decode)
-8. [`decompress`](#decompress)
-9. [`dedupe`](#dedupe)
-10. [`encode`](#encode)
-11. [`filter`](#filter)
-12. [`filter_parts`](#filter_parts)
-13. [`grok`](#grok)
-14. [`hash`](#hash)
-15. [`hash_sample`](#hash_sample)
-16. [`http`](#http)
-17. [`insert_part`](#insert_part)
-18. [`jmespath`](#jmespath)
-19. [`json`](#json)
-20. [`merge_json`](#merge_json)
-21. [`metadata`](#metadata)
-22. [`metric`](#metric)
-23. [`noop`](#noop)
-24. [`process_field`](#process_field)
-25. [`process_map`](#process_map)
-26. [`sample`](#sample)
-27. [`select_parts`](#select_parts)
-28. [`split`](#split)
-29. [`text`](#text)
-30. [`throttle`](#throttle)
-31. [`unarchive`](#unarchive)
+2. [`awk`](#awk)
+3. [`batch`](#batch)
+4. [`bounds_check`](#bounds_check)
+5. [`catch`](#catch)
+6. [`compress`](#compress)
+7. [`conditional`](#conditional)
+8. [`decode`](#decode)
+9. [`decompress`](#decompress)
+10. [`dedupe`](#dedupe)
+11. [`encode`](#encode)
+12. [`filter`](#filter)
+13. [`filter_parts`](#filter_parts)
+14. [`grok`](#grok)
+15. [`group_by`](#group_by)
+16. [`group_by_value`](#group_by_value)
+17. [`hash`](#hash)
+18. [`hash_sample`](#hash_sample)
+19. [`http`](#http)
+20. [`insert_part`](#insert_part)
+21. [`jmespath`](#jmespath)
+22. [`json`](#json)
+23. [`lambda`](#lambda)
+24. [`log`](#log)
+25. [`merge_json`](#merge_json)
+26. [`metadata`](#metadata)
+27. [`metric`](#metric)
+28. [`noop`](#noop)
+29. [`process_batch`](#process_batch)
+30. [`process_dag`](#process_dag)
+31. [`process_field`](#process_field)
+32. [`process_map`](#process_map)
+33. [`sample`](#sample)
+34. [`select_parts`](#select_parts)
+35. [`sleep`](#sleep)
+36. [`split`](#split)
+37. [`subprocess`](#subprocess)
+38. [`text`](#text)
+39. [`throttle`](#throttle)
+40. [`try`](#try)
+41. [`unarchive`](#unarchive)
 
 ## `archive`
 
@@ -74,36 +95,106 @@ archive:
   path: ${!count:files}-${!timestamp_unix_nano}.txt
 ```
 
-Archives all the parts of a message into a single part according to the selected
-archive type. Supported archive types are: tar, binary, lines.
+Archives all the messages of a batch into a single message according to the
+selected archive format. Supported archive formats are: tar, zip, binary, lines.
 
-Some archive types (such as tar) treat each archive item (message part) as a
-file with a path. Since message parts only contain raw data a unique path must
-be generated for each part. This can be done by using function interpolations on
-the 'path' field as described [here](../config_interpolation.md#functions). For
-types that aren't file based (such as binary) the file field is ignored.
+Some archive formats (such as tar, zip) treat each archive item (message part)
+as a file with a path. Since message parts only contain raw data a unique path
+must be generated for each part. This can be done by using function
+interpolations on the 'path' field as described
+[here](../config_interpolation.md#functions). For types that aren't file based
+(such as binary) the file field is ignored.
 
 The resulting archived message adopts the metadata of the _first_ message part
 of the batch.
+
+## `awk`
+
+``` yaml
+type: awk
+awk:
+  codec: text
+  parts: []
+  program: BEGIN { x = 0 } { print $0, x; x++ }
+```
+
+Executes an AWK program on messages by feeding contents as the input based on a
+codec and replaces the contents with the result. If the result is empty (nothing
+is printed by the program) then the original message contents remain unchanged.
+
+Comes with a wide range of [custom functions](./awk_functions.md) for accessing
+message metadata, json fields, printing logs, etc. These functions can be
+overridden by functions within the program.
+
+### Codecs
+
+A codec can be specified that determines how the contents of the message are fed
+into the program. This does not change the custom functions.
+
+`none`
+
+An empty string is fed into the program. Functions can still be used in order to
+extract and mutate metadata and message contents. This is useful for when your
+program only uses functions and doesn't need the full text of the message to be
+parsed by the program.
+
+`text`
+
+The full contents of the message are fed into the program as a string, allowing
+you to reference tokenised segments of the message with variables ($0, $1, etc).
+Custom functions can still be used with this codec.
+
+This is the default codec as it behaves most similar to typical usage of the awk
+command line tool.
+
+`json`
+
+No contents are fed into the program. Instead, variables are extracted from the
+message by walking the flattened JSON structure. Each value is converted into a
+variable by taking its full path, e.g. the object:
+
+``` json
+{
+	"foo": {
+		"bar": {
+			"value": 10
+		},
+		"created_at": "2018-12-18T11:57:32"
+	}
+}
+```
+
+Would result in the following variable declarations:
+
+```
+foo_bar_value = 10
+foo_created_at = "2018-12-18T11:57:32"
+```
+
+Custom functions can also still be used with this codec.
 
 ## `batch`
 
 ``` yaml
 type: batch
 batch:
-  byte_size: 10000
+  byte_size: 0
   condition:
     type: static
     static: false
-  period_ms: 0
+  count: 0
+  period: ""
 ```
 
 Reads a number of discrete messages, buffering (but not acknowledging) the
 message parts until either:
 
-- The total size of the batch in bytes matches or exceeds `byte_size`.
+- The `byte_size` field is non-zero and the total size of the batch in
+  bytes matches or exceeds it.
+- The `count` field is non-zero and the total number of messages in
+  the batch matches or exceeds it.
 - A message added to the batch causes the condition to resolve `true`.
-- The `period_ms` field is non-zero and the time since the last batch
+- The `period` field is non-empty and the time since the last batch
   exceeds its value.
 
 Once one of these events trigger the parts are combined into a single batch of
@@ -111,11 +202,11 @@ messages and sent through the pipeline. After reaching a destination the
 acknowledgment is sent out for all messages inside the batch at the same time,
 preserving at-least-once delivery guarantees.
 
-The `period_ms` field is optional, and when greater than zero defines
-a period in milliseconds whereby a batch is sent even if the `byte_size`
-has not yet been reached. Batch parameters are only triggered when a message is
-added, meaning a pending batch can last beyond this period if no messages are
-added since the period was reached.
+The `period` field - when non-empty - defines a period of time whereby
+a batch is sent even if the `byte_size` has not yet been reached.
+Batch parameters are only triggered when a message is added, meaning a pending
+batch can last beyond this period if no messages are added since the period was
+reached.
 
 When a batch is sent to an output the behaviour will differ depending on the
 protocol. If the output type supports multipart messages then the batch is sent
@@ -139,36 +230,40 @@ bounds_check:
   min_parts: 1
 ```
 
-Checks whether each message fits within certain boundaries, and drops messages
-that do not. A metric is incremented for each dropped message and debug logs
-are also provided if enabled.
+Checks whether each message batch fits within certain boundaries, and drops
+batches that do not.
 
-## `combine`
+## `catch`
 
 ``` yaml
-type: combine
-combine:
-  parts: 2
+type: catch
+catch: []
 ```
 
-Reads a number of discrete messages, buffering (but not acknowledging) the
-message parts until the size of the batch reaches or exceeds the target size.
+Behaves similarly to the [`process_batch`](#process_batch) processor,
+where a list of child processors are applied to individual messages of a batch.
+However, processors are only applied to messages that failed a processing step
+prior to the catch.
 
-Once the size is reached or exceeded the parts are combined into a single batch
-of messages and sent through the pipeline. After reaching a destination the
-acknowledgment is sent out for all messages inside the batch at the same time,
-preserving at-least-once delivery guarantees.
+For example, with the following config:
 
-When a batch is sent to an output the behaviour will differ depending on the
-protocol. If the output type supports multipart messages then the batch is sent
-as a single message with multiple parts. If the output only supports single part
-messages then the parts will be sent as a batch of single part messages. If the
-output supports neither multipart or batches of messages then Benthos falls back
-to sending them individually.
+``` yaml
+- type: foo
+- type: catch
+  catch:
+  - type: bar
+  - type: baz
+```
 
-If a Benthos stream contains multiple brokered inputs or outputs then the batch
-operator should *always* be applied directly after an input in order to avoid
-unexpected behaviour and message ordering.
+If the processor `foo` fails for a particular message, that message
+will be fed into the processors `bar` and `baz`. Messages that do not
+fail for the processor `foo` will skip these processors.
+
+When messages leave the catch block their fail flags are cleared. This processor
+is useful for when it's possible to recover failed messages, or when special
+actions (such as logging/metrics) are required before dropping them.
+
+More information about error handing can be found [here](../error_handling.md).
 
 ## `compress`
 
@@ -180,8 +275,8 @@ compress:
   parts: []
 ```
 
-Compresses parts of a message according to the selected algorithm. Supported
-compression types are: gzip, zlib, flate.
+Compresses messages according to the selected algorithm. Supported compression
+algorithms are: gzip, zlib, flate.
 
 The 'level' field might not apply to all algorithms.
 
@@ -201,10 +296,13 @@ conditional:
 ```
 
 Conditional is a processor that has a list of child `processors`,
-`else_processors`, and a condition. For each message, if the condition
-passes, the child `processors` will be applied, otherwise the
-`else_processors` are applied. This processor is useful for applying
-processors based on the content type of the message.
+`else_processors`, and a condition. For each message batch, if the
+condition passes, the child `processors` will be applied, otherwise
+the `else_processors` are applied. This processor is useful for
+applying processors based on the content of message batches.
+
+In order to conditionally process each message of a batch individually use this
+processor with the [`process_batch`](#process_batch) processor.
 
 You can find a [full list of conditions here](../conditions).
 
@@ -217,8 +315,8 @@ decode:
   scheme: base64
 ```
 
-Decodes parts of a message according to the selected scheme. Supported available
-schemes are: base64.
+Decodes messages according to the selected scheme. Supported available schemes
+are: base64.
 
 ## `decompress`
 
@@ -229,11 +327,8 @@ decompress:
   parts: []
 ```
 
-Decompresses message parts according to the selected algorithm. Supported
+Decompresses messages according to the selected algorithm. Supported
 decompression types are: gzip, zlib, bzip2, flate.
-
-Parts that fail to decompress (invalid format) will be removed from the message.
-If the message results in zero parts it is skipped entirely.
 
 ## `dedupe`
 
@@ -248,15 +343,19 @@ dedupe:
   - 0
 ```
 
-Dedupes messages by caching selected (and optionally hashed) message parts,
-dropping messages that are already cached. The hash type can be chosen from:
-none or xxhash (more will come soon).
+Dedupes message batches by caching selected (and optionally hashed) messages,
+dropping batches that are already cached. The hash type can be chosen from:
+none or xxhash.
+
+This processor acts across an entire batch, in order to deduplicate individual
+messages within a batch use this processor with the
+[`process_batch`](#process_batch) processor.
 
 Optionally, the `key` field can be populated in order to hash on a
-function interpolated string rather than the full contents of message parts.
-This allows you to deduplicate based on dynamic fields within a message, such as
-its metadata, JSON fields, etc. A full list of interpolation functions can be
-found [here](../config_interpolation.md#functions).
+function interpolated string rather than the full contents of messages. This
+allows you to deduplicate based on dynamic fields within a message, such as its
+metadata, JSON fields, etc. A full list of interpolation functions can be found
+[here](../config_interpolation.md#functions).
 
 For example, the following config would deduplicate based on the concatenated
 values of the metadata field `kafka_key` and the value of the JSON
@@ -271,6 +370,23 @@ dedupe:
 Caches should be configured as a resource, for more information check out the
 [documentation here](../caches).
 
+### Delivery Guarantees
+
+Performing a deduplication step on a payload in transit voids any at-least-once
+guarantees that the payload previously had, as it's impossible to fully
+guarantee that the message is propagated to the next destination. If the message
+is reprocessed due to output failure or a service restart then it will be lost
+due to failing the deduplication step on the second attempt.
+
+You can avoid reprocessing payloads on failed sends by using either the
+[`retry`](../outputs/README.md#retry) output type or the
+[`broker`](../outputs/README.md#broker) output type using the 'try'
+pattern. However, if the service is restarted between retry attempts then the
+message can still be lost.
+
+It is worth strongly considering the delivery guarantees that your pipeline is
+meant to provide when using this processor.
+
 ## `encode`
 
 ``` yaml
@@ -280,8 +396,8 @@ encode:
   scheme: base64
 ```
 
-Encodes parts of a message according to the selected scheme. Supported schemes
-are: base64.
+Encodes messages according to the selected scheme. Supported schemes are:
+base64.
 
 ## `filter`
 
@@ -295,51 +411,32 @@ filter:
     part: 0
 ```
 
-Tests each message against a condition, if the condition fails then the message
-is dropped. You can find a [full list of conditions here](../conditions).
+Tests each message batch against a condition, if the condition fails then the
+batch is dropped. You can find a [full list of conditions here](../conditions).
 
-NOTE: If you are combining messages into batches using the
-[`combine`](#combine) or [`batch`](#batch) processors this filter will
-apply to the _whole_ batch. If you instead wish to filter _individual_ parts of
-the batch use the [`filter_parts`](#filter_parts) processor.
+In order to filter individual messages of a batch use the
+[`filter_parts`](#filter_parts) processor.
 
 ## `filter_parts`
 
 ``` yaml
 type: filter_parts
 filter_parts:
-  and: []
-  count:
-    arg: 100
-  jmespath:
-    part: 0
-    query: ""
-  metadata:
-    arg: ""
-    key: ""
-    operator: equals_cs
-    part: 0
-  not: {}
-  or: []
-  resource: ""
-  static: true
+  type: text
   text:
     arg: ""
     operator: equals_cs
     part: 0
-  type: text
-  xor: []
 ```
 
-Tests each individual part of a message batch against a condition, if the
-condition fails then the part is dropped. If the resulting batch is empty it
-will be dropped. You can find a [full list of conditions here](../conditions),
-in this case each condition will be applied to a part as if it were a single
-part message.
+Tests each individual message of a batch against a condition, if the condition
+fails then the message is dropped. If the resulting batch is empty it will be
+dropped. You can find a [full list of conditions here](../conditions), in this
+case each condition will be applied to a message as if it were a single message
+batch.
 
 This processor is useful if you are combining messages into batches using the
-[`combine`](#combine) or [`batch`](#batch) processors and wish to
-remove specific parts.
+[`batch`](#batch) processor and wish to remove specific parts.
 
 ## `grok`
 
@@ -354,14 +451,128 @@ grok:
   use_default_patterns: true
 ```
 
-Parses a payload by attempting to apply a list of Grok patterns, if a pattern
-returns at least one value a resulting structured object is created according to
-the chosen output format and will replace the payload. Currently only json is a
-valid output format.
+Parses message payloads by attempting to apply a list of Grok patterns, if a
+pattern returns at least one value a resulting structured object is created
+according to the chosen output format and will replace the payload. Currently
+only json is a valid output format.
 
 This processor respects type hints in the grok patterns, therefore with the
 pattern `%{WORD:first},%{INT:second:int}` and a payload of `foo,1`
 the resulting payload would be `{"first":"foo","second":1}`.
+
+## `group_by`
+
+``` yaml
+type: group_by
+group_by: []
+```
+
+Splits a batch of messages into N batches, where each resulting batch contains a
+group of messages determined by conditions that are applied per message of the
+original batch. Once the groups are established a list of processors are applied
+to their respective grouped batch, which can be used to label the batch as per
+their grouping.
+
+Each group is configured in a list with a condition and a list of processors:
+
+``` yaml
+type: group_by
+group_by:
+  - condition:
+      type: static
+      static: true
+    processors:
+      - type: noop
+```
+
+Messages are added to the first group that passes and can only belong to a
+single group. Messages that do not pass the conditions of any group are placed
+in a final batch with no processors applied.
+
+For example, imagine we have a batch of messages that we wish to split into two
+groups - the foos and the bars - which should be sent to different output
+destinations based on those groupings. We also need to send the foos as a tar
+gzip archive. For this purpose we can use the `group_by` processor
+with a [`switch`](../outputs/README.md#switch) output:
+
+``` yaml
+pipeline:
+  processors:
+  - type: group_by
+    group_by:
+    - condition:
+        type: text
+        text:
+          operator: contains
+          arg: "this is a foo"
+      processors:
+      - type: archive
+        archive:
+          format: tar
+      - type: compress
+        compress:
+          algorithm: gzip
+      - type: metadata
+        metadata:
+          operator: set
+          key: grouping
+          value: foo
+output:
+  type: switch
+  switch:
+    outputs:
+    - output:
+        type: foo_output
+      condition:
+        type: metadata
+        metadata:
+          operator: equals
+          key: grouping
+          arg: foo
+    - output:
+        type: bar_output
+```
+
+Since any message that isn't a foo is a bar, and bars do not require their own
+processing steps, we only need a single grouping configuration.
+
+## `group_by_value`
+
+``` yaml
+type: group_by_value
+group_by_value:
+  value: ${!metadata:example}
+```
+
+Splits a batch of messages into N batches, where each resulting batch contains a
+group of messages determined by a
+[function interpolated string](../config_interpolation.md#functions) evaluated
+per message. This allows you to group messages using arbitrary fields within
+their content or metadata, process them individually, and send them to unique
+locations as per their group.
+
+For example, if we were consuming Kafka messages and needed to group them by
+their key, archive the groups, and send them to S3 with the key as part of the
+path we could achieve that with the following:
+
+``` yaml
+pipeline:
+  processors:
+  - type: group_by_value
+    group_by_value:
+      value: ${!metadata:kafka_key}
+  - type: archive
+    archive:
+      format: tar
+  - type: compress
+    compress:
+      algorithm: gzip
+output:
+  type: s3
+  s3:
+    bucket: TODO
+    path: docs/${!metadata:kafka_key}/${!count:files}-${!timestamp_unix_nano}.tar.gz
+```
 
 ## `hash`
 
@@ -372,8 +583,8 @@ hash:
   parts: []
 ```
 
-Hashes parts of a message according to the selected algorithm. Supported
-algorithms are: sha256, sha512, xxhash64.
+Hashes messages according to the selected algorithm. Supported algorithms are:
+sha256, sha512, xxhash64.
 
 This processor is mostly useful when combined with the
 [`process_field`](#process_field) processor as it allows you to hash a
@@ -400,12 +611,15 @@ hash_sample:
   retain_min: 0
 ```
 
-Retains a percentage of messages deterministically by hashing selected parts of
-the message and checking the hash against a valid range, dropping all others.
+Retains a percentage of message batches deterministically by hashing selected
+messages and checking the hash against a valid range, dropping all others.
 
 For example, setting `retain_min` to `0.0` and `remain_max` to `50.0`
 results in dropping half of the input stream, and setting `retain_min`
 to `50.0` and `retain_max` to `100.1` will drop the _other_ half.
+
+In order to sample individual messages of a batch use this processor with the
+[`process_batch`](#process_batch) processor.
 
 ## `http`
 
@@ -424,7 +638,7 @@ http:
     drop_on: []
     headers:
       Content-Type: application/octet-stream
-    max_retry_backoff_ms: 300000
+    max_retry_backoff: 300s
     oauth:
       access_token: ""
       access_token_secret: ""
@@ -432,12 +646,14 @@ http:
       consumer_secret: ""
       enabled: false
       request_url: ""
+    rate_limit: ""
     retries: 3
-    retry_period_ms: 1000
-    timeout_ms: 5000
+    retry_period: 1s
+    timeout: 5s
     tls:
-      cas_file: ""
+      client_certs: []
       enabled: false
+      root_cas_file: ""
       skip_cert_verify: false
     url: http://localhost:4195/post
     verb: POST
@@ -458,6 +674,10 @@ parallel requests with `max_parallel`. Alternatively, you can use the
 [`archive`](#archive) processor to create a single message
 from the batch.
 
+The `rate_limit` field can be used to specify a rate limit
+[resource](../rate_limits/README.md) to cap the rate of requests across all
+parallel components service wide.
+
 The URL and header values of this type can be dynamically set using function
 interpolations described [here](../config_interpolation.md#functions).
 
@@ -465,6 +685,13 @@ In order to map or encode the payload to a specific request body, and map the
 response back into the original payload instead of replacing it entirely, you
 can use the [`process_map`](#process_map) or
  [`process_field`](#process_field) processors.
+ 
+### Error Handling
+
+When all retry attempts for a message are exhausted the processor cancels the
+attempt. These failed messages will continue through the pipeline unchanged, but
+can be dropped or placed in a dead letter queue according to your config, you
+can read about these patterns [here](../error_handling.md).
 
 ## `insert_part`
 
@@ -475,14 +702,14 @@ insert_part:
   index: -1
 ```
 
-Insert a new message part at an index. If the specified index is greater than
-the length of the existing parts it will be appended to the end.
+Insert a new message into a batch at an index. If the specified index is greater
+than the length of the existing batch it will be appended to the end.
 
-The index can be negative, and if so the part will be inserted from the end
-counting backwards starting from -1. E.g. if index = -1 then the new part will
-become the last part of the message, if index = -2 then the new part will be
-inserted before the last element, and so on. If the negative index is greater
-than the length of the existing parts it will be inserted at the beginning.
+The index can be negative, and if so the message will be inserted from the end
+counting backwards starting from -1. E.g. if index = -1 then the new message
+will become the last of the batch, if index = -2 then the new message will be
+inserted before the last message, and so on. If the negative index is greater
+than the length of the existing batch it will be inserted at the beginning.
 
 This processor will interpolate functions within the 'content' field, you can
 find a list of functions [here](../config_interpolation.md#functions).
@@ -496,7 +723,7 @@ jmespath:
   query: ""
 ```
 
-Parses a message part as a JSON blob and attempts to apply a JMESPath expression
+Parses a message as a JSON document and attempts to apply a JMESPath expression
 to it, replacing the contents of the part with the result. Please refer to the
 [JMESPath website](http://jmespath.org/) for information and tutorials regarding
 the syntax of expressions.
@@ -505,11 +732,10 @@ For example, with the following config:
 
 ``` yaml
 jmespath:
-  parts: [ 0 ]
   query: locations[?state == 'WA'].name | sort(@) | {Cities: join(', ', @)}
 ```
 
-If the initial contents of part 0 were:
+If the initial contents of a message were:
 
 ``` json
 {
@@ -522,7 +748,7 @@ If the initial contents of part 0 were:
 }
 ```
 
-Then the resulting contents of part 0 would be:
+Then the resulting contents would be:
 
 ``` json
 {"Cities": "Bellevue, Olympia, Seattle"}
@@ -543,8 +769,8 @@ json:
   value: ""
 ```
 
-Parses a message part as a JSON document, performs a mutation on the data, and
-then overwrites the previous contents with the new value.
+Parses messages as a JSON document, performs a mutation on the data, and then
+overwrites the previous contents with the new value.
 
 If the path is empty or "." the root of the data will be targeted.
 
@@ -621,6 +847,76 @@ json:
 The value will be converted into '{"foo":{"bar":5}}'. If the YAML object
 contains keys that aren't strings those fields will be ignored.
 
+## `lambda`
+
+``` yaml
+type: lambda
+lambda:
+  credentials:
+    id: ""
+    role: ""
+    role_external_id: ""
+    secret: ""
+    token: ""
+  endpoint: ""
+  function: ""
+  parallel: false
+  rate_limit: ""
+  region: eu-west-1
+  retries: 3
+  timeout: 5s
+```
+
+Invokes an AWS lambda for each message part of a batch. The contents of the
+message part is the payload of the request, and the result of the invocation
+will become the new contents of the message.
+
+It is possible to perform requests per message of a batch in parallel by setting
+the `parallel` flag to `true`. The `rate_limit`
+field can be used to specify a rate limit [resource](../rate_limits/README.md)
+to cap the rate of requests across parallel components service wide.
+
+In order to map or encode the payload to a specific request body, and map the
+response back into the original payload instead of replacing it entirely, you
+can use the [`process_map`](#process_map) or
+ [`process_field`](#process_field) processors.
+
+### Error Handling
+
+When all retry attempts for a message are exhausted the processor cancels the
+attempt. These failed messages will continue through the pipeline unchanged, but
+can be dropped or placed in a dead letter queue according to your config, you
+can read about these patterns [here](../error_handling.md).
+
+## `log`
+
+``` yaml
+type: log
+log:
+  level: INFO
+  message: ""
+```
+
+Log is a processor that prints a log event each time it processes a message. The
+message is then sent onwards unchanged. The log message can be set using
+function interpolations described [here](../config_interpolation.md#functions)
+which allows you to log the contents and metadata of a message.
+
+For example, if we wished to create a debug log event for each message in a
+pipeline in order to expose the JSON field `foo.bar` as well as the
+metadata field `kafka_partition` we can achieve that with the
+following config:
+
+``` yaml
+type: log
+log:
+  level: DEBUG
+  message: "field: ${!json_field:foo.bar}, part: ${!metadata:kafka_partition}"
+```
+
+The `level` field determines the log level of the printed events and
+can be any of the following values: TRACE, DEBUG, INFO, WARN, ERROR.
+
 ## `merge_json`
 
 ``` yaml
@@ -630,11 +926,11 @@ merge_json:
   retain_parts: false
 ```
 
-Parses selected message parts as JSON documents, attempts to merge them into one
-single JSON document and then writes it to a new message part at the end of the
-message. Merged parts are removed unless `retain_parts` is set to
-true. The new merged message part will contain the metadata of the first part to
-be merged.
+Parses selected messages of a batch as JSON documents, attempts to merge them
+into one single JSON document and then writes it to a new message at the end of
+the batch. Merged parts are removed unless `retain_parts` is set to
+true. The new merged message will contain the metadata of the first part to be
+merged.
 
 ## `metadata`
 
@@ -753,11 +1049,91 @@ populate them with context about the message.
 
 ``` yaml
 type: noop
-noop: null
 ```
 
 Noop is a no-op processor that does nothing, the message passes through
 unchanged.
+
+## `process_batch`
+
+``` yaml
+type: process_batch
+process_batch: []
+```
+
+A processor that applies a list of child processors to messages of a batch as
+though they were each a batch of one message. This is useful for forcing batch
+wide processors such as [`dedupe`](#dedupe) to apply to individual
+message parts of a batch instead.
+
+Please note that most processors already process per message of a batch, and
+this processor is not needed in those cases.
+
+## `process_dag`
+
+``` yaml
+type: process_dag
+process_dag: {}
+```
+
+A processor that manages a map of `process_map` processors and
+calculates a Directed Acyclic Graph (DAG) of their dependencies by referring to
+their postmap targets for provided fields and their premap targets for required
+fields.
+
+The DAG is then used to execute the children in the necessary order with the
+maximum parallelism possible.
+
+The field `dependencies` is an optional array of fields that a child
+depends on. This is useful for when fields are required but don't appear within
+a premap such as those used in conditions.
+
+This processor is extremely useful for performing a complex mesh of enrichments
+where network requests mean we desire maximum parallelism across those
+enrichments.
+
+For example, if we had three target HTTP services that we wished to enrich each
+document with - foo, bar and baz - where baz relies on the result of both foo
+and bar, we might express that relationship here like so:
+
+``` yaml
+type: process_dag
+process_dag:
+  foo:
+    premap:
+      .: .
+    processors:
+    - type: http
+      http:
+        request:
+          url: http://foo/enrich
+    postmap:
+      foo_result: .
+  bar:
+    premap:
+      .: msg.sub.path
+    processors:
+    - type: http
+      http:
+        request:
+          url: http://bar/enrich
+    postmap:
+      bar_result: .
+  baz:
+    premap:
+      foo_obj: foo_result
+      bar_obj: bar_result
+    processors:
+    - type: http
+      http:
+        request:
+          url: http://baz/enrich
+    postmap:
+      baz_obj: .
+```
+
+With this config the DAG would determine that the children foo and bar can be
+executed in parallel, and once they are both finished we may proceed onto baz.
 
 ## `process_field`
 
@@ -769,22 +1145,14 @@ process_field:
   processors: []
 ```
 
-A processor that extracts the value of a field within payloads as a string
-(currently only JSON format is supported) then applies a list of processors to
-the extracted value, and finally sets the field within the original payloads to
-the processed result as a string.
+A processor that extracts the value of a field within payloads (currently only
+JSON format is supported) then applies a list of processors to the extracted
+value, and finally sets the field within the original payloads to the processed
+result.
 
 If the number of messages resulting from the processing steps does not match the
 original count then this processor fails and the messages continue unchanged.
 Therefore, you should avoid using batch and filter type processors in this list.
-
-### Batch Ordering
-
-This processor supports batch messages. When processing results are mapped back
-into the original payload they will be correctly aligned with the original
-batch. However, the ordering of field extracted message parts as they are sent
-through processors are not guaranteed to match the ordering of the original
-batch.
 
 ## `process_map`
 
@@ -830,6 +1198,9 @@ Map paths are arbitrary dot paths, target path hierarchies are constructed if
 they do not yet exist. Processing is skipped for message parts where the premap
 targets aren't found, for optional premap targets use `premap_optional`.
 
+Map target paths that are parents of other map target paths will always be
+mapped first, therefore it is possible to map subpath overrides.
+
 If postmap targets are not found the merge is abandoned, for optional postmap
 targets use `postmap_optional`.
 
@@ -871,9 +1242,9 @@ sample:
   seed: 0
 ```
 
-Retains a randomly sampled percentage of messages (0 to 100) and drops all
-others. The random seed is static in order to sample deterministically, but can
-be set in config to allow parallel samples that are unique.
+Retains a randomly sampled percentage of message batches (0 to 100) and drops
+all others. The random seed is static in order to sample deterministically, but
+can be set in config to allow parallel samples that are unique.
 
 ## `select_parts`
 
@@ -884,20 +1255,32 @@ select_parts:
   - 0
 ```
 
-Cherry pick a set of parts from messages by their index. Indexes larger than the
-number of parts are simply ignored.
+Cherry pick a set of messages from a batch by their index. Indexes larger than
+the number of messages are simply ignored.
 
-The selected parts are added to the new message in the same order as the
+The selected parts are added to the new message batch in the same order as the
 selection array. E.g. with 'parts' set to [ 2, 0, 1 ] and the message parts
 [ '0', '1', '2', '3' ], the output will be [ '2', '0', '1' ].
 
-If none of the selected parts exist in the input message (resulting in an empty
-output message) the message is dropped entirely.
+If none of the selected parts exist in the input batch (resulting in an empty
+output message) the batch is dropped entirely.
 
-Part indexes can be negative, and if so the part will be selected from the end
-counting backwards starting from -1. E.g. if index = -1 then the selected part
-will be the last part of the message, if index = -2 then the part before the
-last element with be selected, and so on.
+Message indexes can be negative, and if so the part will be selected from the
+end counting backwards starting from -1. E.g. if index = -1 then the selected
+part will be the last part of the message, if index = -2 then the part before
+the last element with be selected, and so on.
+
+## `sleep`
+
+``` yaml
+type: sleep
+sleep:
+  duration: 100us
+```
+
+Sleep for a period of time specified as a duration string. This processor will
+interpolate functions within the `duration` field, you can find a list
+of functions [here](../config_interpolation.md#functions).
 
 ## `split`
 
@@ -916,6 +1299,34 @@ remainder is also sent as a single batch. For example, if your target size was
 10, and the processor received a batch of 95 message parts, the result would be
 9 batches of 10 messages followed by a batch of 5 messages.
 
+The split processor should *always* be positioned at the end of a list of
+processors.
+
+## `subprocess`
+
+``` yaml
+type: subprocess
+subprocess:
+  args: []
+  name: cat
+  parts: []
+```
+
+Subprocess is a processor that runs a process in the background and, for each
+message, will pipe its contents to the stdin stream of the process followed by a
+newline.
+
+The subprocess must then either return a line over stdout or stderr. If a
+response is returned over stdout then its contents will replace the message. If
+a response is instead returned from stderr will be logged and the message will
+continue unchanged and will be marked as failed.
+
+NOTE: it is required that processes executed in this way flush their stdout
+pipes for each line.
+
+Benthos will attempt to keep the process alive for as long as the pipeline is
+running. If the process exits early it will be restarted.
+
 ## `text`
 
 ``` yaml
@@ -929,14 +1340,26 @@ text:
 
 Performs text based mutations on payloads.
 
-This processor will interpolate functions within the 'value' field, you can find
-a list of functions [here](../config_interpolation.md#functions).
+This processor will interpolate functions within the `value` field,
+you can find a list of functions [here](../config_interpolation.md#functions).
 
 ### Operations
 
 #### `append`
 
 Appends text to the end of the payload.
+
+#### `escape_url_query`
+
+Escapes text so that it is safe to place within the query section of a URL.
+
+#### `unescape_url_query`
+
+Unescapes text that has been url escaped.
+
+#### `find_regexp`
+
+Extract the matching section of the argument regular expression in a message.
 
 #### `prepend`
 
@@ -949,19 +1372,32 @@ Replaces all occurrences of the argument in a message with a value.
 #### `replace_regexp`
 
 Replaces all occurrences of the argument regular expression in a message with a
-value.
+value. Inside the value $ signs are interpreted as submatch expansions, e.g. $1
+represents the text of the first submatch.
+
+#### `set`
+
+Replace the contents of a message entirely with a value.
 
 #### `strip_html`
 
 Removes all HTML tags from a message.
 
-#### `trim_space`
+#### `to_lower`
 
-Removes all leading and trailing whitespace from the payload.
+Converts all text into lower case.
+
+#### `to_upper`
+
+Converts all text into upper case.
 
 #### `trim`
 
 Removes all leading and trailing occurrences of characters within the arg field.
+
+#### `trim_space`
+
+Removes all leading and trailing whitespace from the payload.
 
 ## `throttle`
 
@@ -978,6 +1414,38 @@ each with a throttle would result in four times the rate specified.
 The period should be specified as a time duration string. For example, '1s'
 would be 1 second, '10ms' would be 10 milliseconds, etc.
 
+## `try`
+
+``` yaml
+type: try
+try: []
+```
+
+Behaves similarly to the [`process_batch`](#process_batch) processor,
+where a list of child processors are applied to individual messages of a batch.
+However, if a processor fails for a message then that message will skip all
+following processors.
+
+For example, with the following config:
+
+``` yaml
+- type: try
+  try:
+  - type: foo
+  - type: bar
+  - type: baz
+```
+
+If the processor `foo` fails for a particular message, that message
+will skip the processors `bar` and `baz`.
+
+This processor is useful for when child processors depend on the successful
+output of previous processors. This processor can be followed with a
+[catch](#catch) processor for defining child processors to be applied
+only to failed messages.
+
+More information about error handing can be found [here](../error_handling.md).
+
 ## `unarchive`
 
 ``` yaml
@@ -987,14 +1455,15 @@ unarchive:
   parts: []
 ```
 
-Unarchives parts of a message according to the selected archive type into
-multiple parts. Supported archive types are: tar, binary, lines.
+Unarchives messages according to the selected archive format into multiple
+messages within a batch. Supported archive formats are: tar, zip, binary, lines.
 
-When a part is unarchived it is split into more message parts that replace the
-original part. If you wish to split the archive into one message per file then
-follow this with the 'split' processor.
+When a message is unarchived the new messages replaces the original message in
+the batch. Messages that are selected but fail to unarchive (invalid format)
+will remain unchanged in the message batch but will be flagged as having failed.
 
-Parts that are selected but fail to unarchive (invalid format) will be removed
-from the message. If the message results in zero parts it is skipped entirely.
+For the unarchive formats that contain file information (tar, zip), a metadata
+field is added to each message called `archive_filename` with the
+extracted filename.
 
-[0]: ./examples.md
+[0]: ../examples/README.md

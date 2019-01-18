@@ -22,6 +22,7 @@ package processor
 
 import (
 	"errors"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -35,9 +36,8 @@ func init() {
 	Constructors[TypeBoundsCheck] = TypeSpec{
 		constructor: NewBoundsCheck,
 		description: `
-Checks whether each message fits within certain boundaries, and drops messages
-that do not. A metric is incremented for each dropped message and debug logs
-are also provided if enabled.`,
+Checks whether each message batch fits within certain boundaries, and drops
+batches that do not.`,
 	}
 }
 
@@ -77,7 +77,7 @@ type BoundsCheck struct {
 	mDroppedNumParts metrics.StatCounter
 	mDroppedPartSize metrics.StatCounter
 	mSent            metrics.StatCounter
-	mSentParts       metrics.StatCounter
+	mBatchSent       metrics.StatCounter
 }
 
 // NewBoundsCheck returns a BoundsCheck processor.
@@ -86,16 +86,16 @@ func NewBoundsCheck(
 ) (Type, error) {
 	return &BoundsCheck{
 		conf:  conf,
-		log:   log.NewModule(".processor.bounds_check"),
+		log:   log,
 		stats: stats,
 
-		mCount:           stats.GetCounter("processor.bounds_check.count"),
-		mDropped:         stats.GetCounter("processor.bounds_check.dropped"),
-		mDroppedEmpty:    stats.GetCounter("processor.bounds_check.dropped_empty"),
-		mDroppedNumParts: stats.GetCounter("processor.bounds_check.dropped_num_parts"),
-		mDroppedPartSize: stats.GetCounter("processor.bounds_check.dropped_part_size"),
-		mSent:            stats.GetCounter("processor.bounds_check.sent"),
-		mSentParts:       stats.GetCounter("processor.bounds_check.parts.sent"),
+		mCount:           stats.GetCounter("count"),
+		mDropped:         stats.GetCounter("dropped"),
+		mDroppedEmpty:    stats.GetCounter("dropped_empty"),
+		mDroppedNumParts: stats.GetCounter("dropped_num_parts"),
+		mDroppedPartSize: stats.GetCounter("dropped_part_size"),
+		mSent:            stats.GetCounter("sent"),
+		mBatchSent:       stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -147,10 +147,19 @@ func (m *BoundsCheck) ProcessMessage(msg types.Message) ([]types.Message, types.
 		return nil, response.NewAck()
 	}
 
-	m.mSent.Incr(1)
-	m.mSentParts.Incr(int64(msg.Len()))
+	m.mBatchSent.Incr(1)
+	m.mSent.Incr(int64(msg.Len()))
 	msgs := [1]types.Message{msg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (m *BoundsCheck) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (m *BoundsCheck) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

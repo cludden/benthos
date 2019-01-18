@@ -73,7 +73,7 @@ func NewRedisStreams(
 ) (*RedisStreams, error) {
 
 	r := &RedisStreams{
-		log:   log.NewModule(".output.redis_streams"),
+		log:   log,
 		stats: stats,
 		conf:  conf,
 	}
@@ -108,7 +108,7 @@ func (r *RedisStreams) Connect() error {
 		return err
 	}
 
-	r.log.Infof("Pushing messages to Redis stream %v at URL: %v\n", r.conf.Stream, r.conf.URL)
+	r.log.Infof("Pushing messages to Redis stream: %v\n", r.conf.Stream)
 
 	r.client = client
 	return nil

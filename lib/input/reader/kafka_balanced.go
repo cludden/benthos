@@ -22,6 +22,7 @@ package reader
 
 import (
 	"crypto/tls"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,9 +44,11 @@ type KafkaBalancedConfig struct {
 	Addresses       []string    `json:"addresses" yaml:"addresses"`
 	ClientID        string      `json:"client_id" yaml:"client_id"`
 	ConsumerGroup   string      `json:"consumer_group" yaml:"consumer_group"`
-	CommitPeriodMS  int         `json:"commit_period_ms" yaml:"commit_period_ms"`
+	CommitPeriod    string      `json:"commit_period" yaml:"commit_period"`
 	Topics          []string    `json:"topics" yaml:"topics"`
 	StartFromOldest bool        `json:"start_from_oldest" yaml:"start_from_oldest"`
+	TargetVersion   string      `json:"target_version" yaml:"target_version"`
+	MaxBatchCount   int         `json:"max_batch_count" yaml:"max_batch_count"`
 	TLS             btls.Config `json:"tls" yaml:"tls"`
 }
 
@@ -55,9 +58,11 @@ func NewKafkaBalancedConfig() KafkaBalancedConfig {
 		Addresses:       []string{"localhost:9092"},
 		ClientID:        "benthos_kafka_input",
 		ConsumerGroup:   "benthos_consumer_group",
-		CommitPeriodMS:  1000,
+		CommitPeriod:    "1s",
 		Topics:          []string{"benthos_stream"},
 		StartFromOldest: true,
+		TargetVersion:   sarama.V1_0_0_0.String(),
+		MaxBatchCount:   1,
 		TLS:             btls.NewConfig(),
 	}
 }
@@ -68,12 +73,14 @@ func NewKafkaBalancedConfig() KafkaBalancedConfig {
 // partitions across other consumers of the same consumer group.
 type KafkaBalanced struct {
 	consumer *cluster.Consumer
+	version  sarama.KafkaVersion
 	cMut     sync.Mutex
 
 	tlsConf *tls.Config
 
 	offsetLastCommitted time.Time
 	offsets             map[string]map[int32]int64
+	commitPeriod        time.Duration
 
 	mRcvErr     metrics.StatCounter
 	mRebalanced metrics.StatCounter
@@ -92,10 +99,10 @@ func NewKafkaBalanced(
 	k := KafkaBalanced{
 		conf:        conf,
 		stats:       stats,
-		mRcvErr:     stats.GetCounter("input.kafka_balanced.recv.error"),
-		mRebalanced: stats.GetCounter("input.kafka_balanced.rebalanced"),
+		mRcvErr:     stats.GetCounter("recv.error"),
+		mRebalanced: stats.GetCounter("rebalanced"),
 		offsets:     map[string]map[int32]int64{},
-		log:         log.NewModule(".input.kafka_balanced"),
+		log:         log,
 	}
 	if conf.TLS.Enabled {
 		var err error
@@ -116,6 +123,16 @@ func NewKafkaBalanced(
 				k.topics = append(k.topics, splitTopics)
 			}
 		}
+	}
+	if tout := conf.CommitPeriod; len(tout) > 0 {
+		var err error
+		if k.commitPeriod, err = time.ParseDuration(tout); err != nil {
+			return nil, fmt.Errorf("failed to parse commit period string: %v", err)
+		}
+	}
+	var err error
+	if k.version, err = sarama.ParseKafkaVersion(conf.TargetVersion); err != nil {
+		return nil, err
 	}
 	return &k, nil
 }
@@ -156,6 +173,7 @@ func (k *KafkaBalanced) Connect() error {
 	config := cluster.NewConfig()
 	config.ClientID = k.conf.ClientID
 	config.Net.DialTimeout = time.Second
+	config.Version = k.version
 	config.Consumer.Return.Errors = true
 	config.Group.Return.Notifications = true
 	config.Net.TLS.Enable = k.conf.TLS.Enabled
@@ -228,25 +246,50 @@ func (k *KafkaBalanced) Read() (types.Message, error) {
 		return nil, types.ErrNotConnected
 	}
 
+	msg := message.New(nil)
+	addPart := func(data *sarama.ConsumerMessage) {
+		part := message.NewPart(data.Value)
+
+		meta := part.Metadata()
+		for _, hdr := range data.Headers {
+			meta.Set(string(hdr.Key), string(hdr.Value))
+		}
+		meta.Set("kafka_key", string(data.Key))
+		meta.Set("kafka_partition", strconv.Itoa(int(data.Partition)))
+		meta.Set("kafka_topic", data.Topic)
+		meta.Set("kafka_offset", strconv.Itoa(int(data.Offset)))
+		meta.Set("kafka_timestamp_unix", strconv.FormatInt(data.Timestamp.Unix(), 10))
+
+		msg.Append(part)
+
+		k.setOffset(data.Topic, data.Partition, data.Offset)
+	}
+
 	data, open := <-consumer.Messages()
 	if !open {
 		k.closeClients()
-		return nil, types.ErrNotConnected
+		return nil, types.ErrTypeClosed
+	}
+	addPart(data)
+
+batchLoop:
+	for i := 1; i < k.conf.MaxBatchCount; i++ {
+		select {
+		case data, open = <-consumer.Messages():
+			if !open {
+				k.closeClients()
+				return nil, types.ErrTypeClosed
+			}
+			addPart(data)
+		default:
+			// Drained the buffer
+			break batchLoop
+		}
 	}
 
-	msg := message.New([][]byte{data.Value})
-
-	meta := msg.Get(0).Metadata()
-	meta.Set("kafka_key", string(data.Key))
-	meta.Set("kafka_partition", strconv.Itoa(int(data.Partition)))
-	meta.Set("kafka_topic", data.Topic)
-	meta.Set("kafka_offset", strconv.Itoa(int(data.Offset)))
-	meta.Set("kafka_timestamp_unix", strconv.FormatInt(data.Timestamp.Unix(), 10))
-	for _, hdr := range data.Headers {
-		meta.Set(string(hdr.Key), string(hdr.Value))
+	if msg.Len() == 0 {
+		return nil, types.ErrTimeout
 	}
-
-	k.setOffset(data.Topic, data.Partition, data.Offset)
 	return msg, nil
 }
 
@@ -264,8 +307,7 @@ func (k *KafkaBalanced) Acknowledge(err error) error {
 		k.cMut.Unlock()
 	}
 
-	if time.Since(k.offsetLastCommitted) <
-		(time.Millisecond * time.Duration(k.conf.CommitPeriodMS)) {
+	if time.Since(k.offsetLastCommitted) < k.commitPeriod {
 		return nil
 	}
 

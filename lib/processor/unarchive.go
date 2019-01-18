@@ -22,14 +22,15 @@ package processor
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
-	"github.com/Jeffail/benthos/lib/response"
 	"github.com/Jeffail/benthos/lib/types"
 )
 
@@ -39,15 +40,16 @@ func init() {
 	Constructors[TypeUnarchive] = TypeSpec{
 		constructor: NewUnarchive,
 		description: `
-Unarchives parts of a message according to the selected archive type into
-multiple parts. Supported archive types are: tar, binary, lines.
+Unarchives messages according to the selected archive format into multiple
+messages within a batch. Supported archive formats are: tar, zip, binary, lines.
 
-When a part is unarchived it is split into more message parts that replace the
-original part. If you wish to split the archive into one message per file then
-follow this with the 'split' processor.
+When a message is unarchived the new messages replaces the original message in
+the batch. Messages that are selected but fail to unarchive (invalid format)
+will remain unchanged in the message batch but will be flagged as having failed.
 
-Parts that are selected but fail to unarchive (invalid format) will be removed
-from the message. If the message results in zero parts it is skipped entirely.`,
+For the unarchive formats that contain file information (tar, zip), a metadata
+field is added to each message called ` + "`archive_filename`" + ` with the
+extracted filename.`,
 	}
 }
 
@@ -79,7 +81,7 @@ func tarUnarchive(part types.Part) ([]types.Part, error) {
 
 	// Iterate through the files in the archive.
 	for {
-		_, err := tr.Next()
+		h, err := tr.Next()
 		if err == io.EOF {
 			// end of tar archive
 			break
@@ -95,7 +97,36 @@ func tarUnarchive(part types.Part) ([]types.Part, error) {
 
 		newParts = append(newParts,
 			message.NewPart(newPartBuf.Bytes()).
-				SetMetadata(part.Metadata().Copy()))
+				SetMetadata(part.Metadata().Copy().Set("archive_filename", h.Name)))
+	}
+
+	return newParts, nil
+}
+
+func zipUnarchive(part types.Part) ([]types.Part, error) {
+	buf := bytes.NewReader(part.Get())
+	zr, err := zip.NewReader(buf, int64(buf.Len()))
+	if err != nil {
+		return nil, err
+	}
+
+	var newParts []types.Part
+
+	// Iterate through the files in the archive.
+	for _, f := range zr.File {
+		fr, err := f.Open()
+		if err != nil {
+			return nil, err
+		}
+
+		newPartBuf := bytes.Buffer{}
+		if _, err = newPartBuf.ReadFrom(fr); err != nil {
+			return nil, err
+		}
+
+		newParts = append(newParts,
+			message.NewPart(newPartBuf.Bytes()).
+				SetMetadata(part.Metadata().Copy().Set("archive_filename", f.Name)))
 	}
 
 	return newParts, nil
@@ -128,6 +159,8 @@ func strToUnarchiver(str string) (unarchiveFunc, error) {
 	switch str {
 	case "tar":
 		return tarUnarchive, nil
+	case "zip":
+		return zipUnarchive, nil
 	case "binary":
 		return binaryUnarchive, nil
 	case "lines":
@@ -148,12 +181,11 @@ type Unarchive struct {
 	stats metrics.Type
 
 	mCount     metrics.StatCounter
-	mSucc      metrics.StatCounter
 	mErr       metrics.StatCounter
 	mSkipped   metrics.StatCounter
 	mDropped   metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewUnarchive returns a Unarchive processor.
@@ -167,16 +199,15 @@ func NewUnarchive(
 	return &Unarchive{
 		conf:      conf.Unarchive,
 		unarchive: dcor,
-		log:       log.NewModule(".processor.unarchive"),
+		log:       log,
 		stats:     stats,
 
-		mCount:     stats.GetCounter("processor.unarchive.count"),
-		mSucc:      stats.GetCounter("processor.unarchive.success"),
-		mErr:       stats.GetCounter("processor.unarchive.error"),
-		mSkipped:   stats.GetCounter("processor.unarchive.skipped"),
-		mDropped:   stats.GetCounter("processor.unarchive.dropped"),
-		mSent:      stats.GetCounter("processor.unarchive.sent"),
-		mSentParts: stats.GetCounter("processor.unarchive.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErr:       stats.GetCounter("error"),
+		mSkipped:   stats.GetCounter("skipped"),
+		mDropped:   stats.GetCounter("dropped"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -208,24 +239,29 @@ func (d *Unarchive) ProcessMessage(msg types.Message) ([]types.Message, types.Re
 		}
 		newParts, err := d.unarchive(part)
 		if err == nil {
-			d.mSucc.Incr(1)
 			newMsg.Append(newParts...)
 		} else {
 			d.mErr.Incr(1)
+			d.log.Errorf("Failed to unarchive message part: %v\n", err)
+			newMsg.Append(part)
+			FlagFail(newMsg.Get(-1))
 		}
 		return nil
 	})
 
-	if newMsg.Len() == 0 {
-		d.mSkipped.Incr(1)
-		d.mDropped.Incr(1)
-		return nil, response.NewAck()
-	}
-
-	d.mSent.Incr(1)
-	d.mSentParts.Incr(int64(newMsg.Len()))
+	d.mBatchSent.Incr(1)
+	d.mSent.Incr(int64(newMsg.Len()))
 	msgs := [1]types.Message{newMsg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (d *Unarchive) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (d *Unarchive) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

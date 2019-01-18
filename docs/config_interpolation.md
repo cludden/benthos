@@ -16,7 +16,7 @@ config section supports functions you should read its respective documentation.
 
 You can use environment variables to replace Benthos config values using
 `${variable-name}` or `${variable-name:default-value}` syntax. A good example of
-this is the [environment variable config](../../config/env/default.yaml), which
+this is the [environment variable config](../config/env/default.yaml), which
 creates environment variables for each default field value in a standard
 single-in-single-out bridge config.
 
@@ -61,6 +61,16 @@ KAFKA_BROKERS="foo:9092,bar:9092" \
 The syntax for functions is `${!function-name}`, or `${!function-name:arg}` if
 the function takes an argument, where `function-name` should be replaced with
 one of the following function names:
+
+### `content`
+
+Resolves to the content of a message part. The message referred to will depend
+on the context of where the function is called.
+
+When applied to a batch of message parts this function targets the first message
+part by default. It is possible to specify a target part index with an integer
+argument, e.g. `${!content:2}` would print the contents of the third message
+part.
 
 ### `json_field`
 

@@ -22,6 +22,7 @@ package input
 
 import (
 	"encoding/json"
+	"fmt"
 	"path"
 	"sync"
 	"time"
@@ -61,9 +62,9 @@ already exists it will be changed.`,
 				inMap[k] = sanInput
 			}
 			return map[string]interface{}{
-				"inputs":     inMap,
-				"prefix":     conf.Dynamic.Prefix,
-				"timeout_ms": conf.Dynamic.TimeoutMS,
+				"inputs":  inMap,
+				"prefix":  conf.Dynamic.Prefix,
+				"timeout": conf.Dynamic.Timeout,
 			}, nil
 		},
 	}
@@ -73,17 +74,17 @@ already exists it will be changed.`,
 
 // DynamicConfig contains configuration for the Dynamic input type.
 type DynamicConfig struct {
-	Inputs    map[string]Config `json:"inputs" yaml:"inputs"`
-	Prefix    string            `json:"prefix" yaml:"prefix"`
-	TimeoutMS int               `json:"timeout_ms" yaml:"timeout_ms"`
+	Inputs  map[string]Config `json:"inputs" yaml:"inputs"`
+	Prefix  string            `json:"prefix" yaml:"prefix"`
+	Timeout string            `json:"timeout" yaml:"timeout"`
 }
 
 // NewDynamicConfig creates a new DynamicConfig with default values.
 func NewDynamicConfig() DynamicConfig {
 	return DynamicConfig{
-		Inputs:    map[string]Config{},
-		Prefix:    "",
-		TimeoutMS: 5000,
+		Inputs:  map[string]Config{},
+		Prefix:  "",
+		Timeout: "5s",
 	}
 }
 
@@ -108,7 +109,13 @@ func NewDynamic(
 		inputs[k] = newInput
 	}
 
-	reqTimeout := time.Millisecond * time.Duration(conf.Dynamic.TimeoutMS)
+	var timeout time.Duration
+	if tout := conf.Dynamic.Timeout; len(tout) > 0 {
+		var err error
+		if timeout, err = time.ParseDuration(tout); err != nil {
+			return nil, fmt.Errorf("failed to parse timeout string: %v", err)
+		}
+	}
 
 	inputConfigs := conf.Dynamic.Inputs
 	inputConfigsMut := sync.RWMutex{}
@@ -147,14 +154,20 @@ func NewDynamic(
 		if err := json.Unmarshal(c, &newConf); err != nil {
 			return err
 		}
-		newInput, err := New(Config(newConf), mgr, log, stats, pipelines...)
+		ns := fmt.Sprintf("dynamic.inputs.%v", id)
+		newInput, err := New(
+			Config(newConf), mgr,
+			log.NewModule("."+ns),
+			metrics.Combine(stats, metrics.Namespaced(stats, ns)),
+			pipelines...,
+		)
 		if err != nil {
 			return err
 		}
 		inputConfigsMut.Lock()
 		inputConfigs[id] = Config(newConf)
 		inputConfigsMut.Unlock()
-		if err = fanIn.SetInput(id, newInput, reqTimeout); err != nil {
+		if err = fanIn.SetInput(id, newInput, timeout); err != nil {
 			inputConfigsMut.Lock()
 			delete(inputConfigs, id)
 			inputConfigsMut.Unlock()
@@ -162,7 +175,7 @@ func NewDynamic(
 		return err
 	})
 	dynAPI.OnDelete(func(id string) error {
-		return fanIn.SetInput(id, nil, reqTimeout)
+		return fanIn.SetInput(id, nil, timeout)
 	})
 
 	mgr.RegisterEndpoint(

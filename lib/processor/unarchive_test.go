@@ -22,6 +22,7 @@ package processor
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"fmt"
 	"os"
@@ -31,7 +32,6 @@ import (
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
-	"github.com/Jeffail/benthos/lib/response"
 )
 
 func TestUnarchiveBadAlgo(t *testing.T) {
@@ -61,6 +61,7 @@ func TestUnarchiveTar(t *testing.T) {
 	}
 
 	exp := [][]byte{}
+	expNames := []string{}
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -73,6 +74,7 @@ func TestUnarchiveTar(t *testing.T) {
 			Mode: 0600,
 			Size: int64(len(input[i])),
 		}
+		expNames = append(expNames, hdr.Name)
 		if err := tw.WriteHeader(hdr); err != nil {
 			t.Fatal(err)
 		}
@@ -98,12 +100,82 @@ func TestUnarchiveTar(t *testing.T) {
 
 	msgs, res := proc.ProcessMessage(message.New(input))
 	if len(msgs) != 1 {
-		t.Error("Unarchive failed")
+		t.Errorf("Unarchive failed: %v", res)
 	} else if res != nil {
 		t.Errorf("Expected nil response: %v", res)
 	}
 	if act := message.GetAllBytes(msgs[0]); !reflect.DeepEqual(exp, act) {
 		t.Errorf("Unexpected output: %s != %s", act, exp)
+	}
+	for i := 0; i < msgs[0].Len(); i++ {
+		if name := msgs[0].Get(i).Metadata().Get("archive_filename"); name != expNames[i] {
+			t.Errorf("Unexpected name %d: %s != %s", i, name, expNames[i])
+		}
+	}
+}
+
+func TestUnarchiveZip(t *testing.T) {
+	conf := NewConfig()
+	conf.Unarchive.Format = "zip"
+
+	testLog := log.New(os.Stdout, log.Config{LogLevel: "NONE"})
+
+	input := [][]byte{
+		[]byte("hello world first part"),
+		[]byte("hello world second part"),
+		[]byte("third part"),
+		[]byte("fourth"),
+		[]byte("5"),
+	}
+
+	exp := [][]byte{}
+	expNames := []string{}
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	for i := range input {
+		exp = append(exp, input[i])
+
+		name := fmt.Sprintf("testfile%v", i)
+		expNames = append(expNames, name)
+		if fw, err := zw.Create(name); err != nil {
+			t.Fatal(err)
+		} else {
+			if _, err := fw.Write(input[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	input = [][]byte{buf.Bytes()}
+
+	if reflect.DeepEqual(input, exp) {
+		t.Fatal("Input and exp output are the same")
+	}
+
+	proc, err := NewUnarchive(conf, nil, testLog, metrics.DudType{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, res := proc.ProcessMessage(message.New(input))
+	if len(msgs) != 1 {
+		t.Errorf("Unarchive failed: %v", res)
+	} else if res != nil {
+		t.Errorf("Expected nil response: %v", res)
+	}
+	if act := message.GetAllBytes(msgs[0]); !reflect.DeepEqual(exp, act) {
+		t.Errorf("Unexpected output: %s != %s", act, exp)
+	}
+	for i := 0; i < msgs[0].Len(); i++ {
+		if name := msgs[0].Get(i).Metadata().Get("archive_filename"); name != expNames[i] {
+			t.Errorf("Unexpected name %d: %s != %s", i, name, expNames[i])
+		}
 	}
 }
 
@@ -154,15 +226,17 @@ func TestUnarchiveBinary(t *testing.T) {
 		return
 	}
 
-	if msgs, res := proc.ProcessMessage(message.New(nil)); len(msgs) > 0 {
-		t.Error("Expected fail on bad message")
-	} else if _, ok := res.(response.Ack); !ok {
-		t.Error("Expected simple response from bad message")
-	}
-	if msgs, _ := proc.ProcessMessage(
+	msgs, _ := proc.ProcessMessage(
 		message.New([][]byte{[]byte("wat this isnt good")}),
-	); len(msgs) > 0 {
-		t.Error("Expected fail on bad message")
+	)
+	if exp, act := 1, len(msgs); exp != act {
+		t.Fatalf("Wrong count: %v != %v", act, exp)
+	}
+	if exp, act := 1, msgs[0].Len(); exp != act {
+		t.Fatalf("Wrong count: %v != %v", act, exp)
+	}
+	if !HasFailed(msgs[0].Get(0)) {
+		t.Error("Expected fail")
 	}
 
 	testMsg := message.New([][]byte{[]byte("hello"), []byte("world")})
@@ -281,30 +355,5 @@ func TestUnarchiveIndexBounds(t *testing.T) {
 		if exp, act := result.value, string(message.GetAllBytes(msgs[0])[(result.index+1)%5]); exp == act {
 			t.Errorf("Processor was applied to wrong index %v: %v != %v", (result.index+1)%5, act, exp)
 		}
-	}
-}
-
-func TestUnarchiveEmpty(t *testing.T) {
-	conf := NewConfig()
-	conf.Unarchive.Format = "tar"
-	conf.Unarchive.Parts = []int{0, 1}
-
-	testLog := log.New(os.Stdout, log.Config{LogLevel: "NONE"})
-	proc, err := NewUnarchive(conf, nil, testLog, metrics.DudType{})
-	if err != nil {
-		t.Error(err)
-		return
-	}
-
-	msgs, _ := proc.ProcessMessage(message.New([][]byte{}))
-	if len(msgs) != 0 {
-		t.Error("Expected failure with zero part message")
-	}
-
-	msgs, _ = proc.ProcessMessage(message.New(
-		[][]byte{[]byte("first"), []byte("second")},
-	))
-	if len(msgs) != 0 {
-		t.Error("Expected failure with bad data")
 	}
 }

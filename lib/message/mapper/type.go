@@ -1,10 +1,29 @@
+// Copyright (c) 2018 Ashley Jeffs
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+
 package mapper
 
 import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/message"
@@ -22,11 +41,15 @@ type Type struct {
 	log   log.Modular
 	stats metrics.Type
 
-	reqMap    map[string]string
-	reqOptMap map[string]string
+	reqTargets    []string
+	reqMap        map[string]string
+	reqOptTargets []string
+	reqOptMap     map[string]string
 
-	resMap    map[string]string
-	resOptMap map[string]string
+	resTargets    []string
+	resMap        map[string]string
+	resOptTargets []string
+	resOptMap     map[string]string
 
 	conditions []types.Condition
 
@@ -62,11 +85,18 @@ func New(opts ...func(*Type)) (*Type, error) {
 		opt(t)
 	}
 
-	if err := validateMap(t.reqMap); err != nil {
+	var err error
+	if t.reqTargets, err = validateMap(t.reqMap); err != nil {
 		return nil, fmt.Errorf("bad request mandatory map: %v", err)
 	}
-	if err := validateMap(t.resMap); err != nil {
+	if t.reqOptTargets, err = validateMap(t.reqOptMap); err != nil {
+		return nil, fmt.Errorf("bad request optional map: %v", err)
+	}
+	if t.resTargets, err = validateMap(t.resMap); err != nil {
 		return nil, fmt.Errorf("bad response mandatory map: %v", err)
+	}
+	if t.resOptTargets, err = validateMap(t.resOptMap); err != nil {
+		return nil, fmt.Errorf("bad response optional map: %v", err)
 	}
 
 	t.mErrParts = t.stats.GetCounter("error.parts_diverged")
@@ -139,46 +169,24 @@ func OptSetStats(s metrics.Type) func(*Type) {
 
 //------------------------------------------------------------------------------
 
-func validateMap(m map[string]string) error {
-	targets := []string{}
-	for k := range m {
+func validateMap(m map[string]string) ([]string, error) {
+	targets := make([]string, 0, len(m))
+	for k, v := range m {
+		if k == "." {
+			if _, exists := m[""]; exists {
+				return nil, errors.New("dot path '.' and empty path '' both set root")
+			}
+			m[""] = v
+			delete(m, ".")
+			k = ""
+		}
+		if v == "." {
+			m[k] = ""
+		}
 		targets = append(targets, k)
 	}
-	for i, trgt1 := range targets {
-		if trgt1 == "." {
-			trgt1 = ""
-		}
-		if trgt1 == "" && len(targets) > 1 {
-			return errors.New("root map target collides with other targets")
-		}
-		for j, trgt2 := range targets {
-			if trgt2 == "." {
-				trgt2 = ""
-			}
-			if j == i {
-				continue
-			}
-			t1Split, t2Split := strings.Split(trgt1, "."), strings.Split(trgt2, ".")
-			if len(t1Split) == len(t2Split) {
-				// Siblings can't collide
-				continue
-			}
-			if len(t1Split) >= len(t2Split) {
-				continue
-			}
-			matchedSubpaths := true
-			for k, t1p := range t1Split {
-				if t1p != t2Split[k] {
-					matchedSubpaths = false
-					break
-				}
-			}
-			if matchedSubpaths {
-				return fmt.Errorf("map targets '%v' and '%v' collide", trgt1, trgt2)
-			}
-		}
-	}
-	return nil
+	sort.Slice(targets, func(i, j int) bool { return len(targets[i]) < len(targets[j]) })
+	return targets, nil
 }
 
 //------------------------------------------------------------------------------
@@ -187,14 +195,10 @@ func validateMap(m map[string]string) error {
 func (t *Type) TargetsUsed() []string {
 	depsMap := map[string]struct{}{}
 	for _, v := range t.reqMap {
-		if len(v) > 0 && v != "." {
-			depsMap[v] = struct{}{}
-		}
+		depsMap[v] = struct{}{}
 	}
 	for _, v := range t.reqOptMap {
-		if len(v) > 0 && v != "." {
-			depsMap[v] = struct{}{}
-		}
+		depsMap[v] = struct{}{}
 	}
 	deps := []string{}
 	for k := range depsMap {
@@ -208,14 +212,10 @@ func (t *Type) TargetsUsed() []string {
 func (t *Type) TargetsProvided() []string {
 	targetsMap := map[string]struct{}{}
 	for k := range t.resMap {
-		if len(k) > 0 && k != "." {
-			targetsMap[k] = struct{}{}
-		}
+		targetsMap[k] = struct{}{}
 	}
 	for k := range t.resOptMap {
-		if len(k) > 0 && k != "." {
-			targetsMap[k] = struct{}{}
-		}
+		targetsMap[k] = struct{}{}
 	}
 	targets := []string{}
 	for k := range targetsMap {
@@ -253,18 +253,19 @@ func getGabs(msg types.Message, index int) (*gabs.Container, error) {
 
 // MapRequests takes a single payload (of potentially multiple parts, where
 // parts can potentially be nil) and attempts to create a new payload of mapped
-// messages. Also returns an array of message part indexes that were skipped due
-// to either failed conditions or being empty.
-func (t *Type) MapRequests(payload types.Message) (types.Message, []int, error) {
-	mappedMsg := message.New(nil)
-	skipped := []int{}
-
-	msg := payload.Copy()
+// messages.
+//
+// Two arrays are also returned, the first containing all message part indexes
+// that were skipped due to either failed conditions or for being empty. The
+// second contains only message part indexes that failed their map stage.
+func (t *Type) MapRequests(payload types.Message) (mappedMsg types.Message, skipped, failed []int) {
+	mappedMsg = message.New(nil)
+	msg := payload
 
 partLoop:
 	for i := 0; i < msg.Len(); i++ {
 		// Skip if message part is empty.
-		if p := msg.Get(i).Get(); p == nil || len(p) == 0 {
+		if msg.Get(i).IsEmpty() {
 			skipped = append(skipped, i)
 			continue partLoop
 		}
@@ -275,74 +276,82 @@ partLoop:
 			continue partLoop
 		}
 
-		t.log.Tracef("Unmapped message part '%v': %q\n", i, msg.Get(i).Get())
+		if len(t.reqMap) == 0 && len(t.reqOptMap) == 0 {
+			mappedMsg.Append(msg.Get(i).Copy())
+			continue partLoop
+		}
+
 		sourceObj, err := getGabs(msg, i)
 		if err != nil {
 			t.mReqErr.Incr(1)
 			t.mReqErrJSON.Incr(1)
-			t.log.Debugf("Failed to parse message part '%v': %v. Failed part: %q\n", i, err, msg.Get(i).Get())
+			t.log.Debugf("Failed to parse message part '%v': %v. Failed part: %q\n", i, err, msg.Get(i).Copy().Get())
 
 			// Skip if message part fails JSON parse.
-			skipped = append(skipped, i)
+			failed = append(failed, i)
 			continue partLoop
 		}
 
 		destObj := gabs.New()
-		if len(t.reqMap) == 0 && len(t.reqOptMap) == 0 {
-			destObj = sourceObj
-		}
-		for k, v := range t.reqMap {
+		for _, k := range t.reqTargets {
+			v := t.reqMap[k]
 			src := sourceObj
-			if len(v) > 0 && v != "." {
+			if len(v) > 0 {
 				src = sourceObj.Path(v)
 				if src.Data() == nil {
 					t.mReqErr.Incr(1)
 					t.mReqErrMap.Incr(1)
-					t.log.Debugf("Failed to find request map target '%v' in message part '%v'. Message contents: %q\n", v, i, msg.Get(i).Get())
+					t.log.Debugf("Failed to find request map target '%v' in message part '%v'.\n", v, i)
 
 					// Skip if message part fails mapping.
-					skipped = append(skipped, i)
+					failed = append(failed, i)
 					continue partLoop
 				}
 			}
-			if len(k) > 0 && k != "." {
-				destObj.SetP(src.Data(), k)
+			srcData, _ := message.CopyJSON(src.Data())
+			if len(k) > 0 {
+				destObj.SetP(srcData, k)
 			} else {
-				destObj = src
+				destObj, _ = gabs.Consume(srcData)
 			}
 		}
-		for k, v := range t.reqOptMap {
+		for _, k := range t.reqOptTargets {
+			v := t.reqOptMap[k]
 			src := sourceObj
-			if len(v) > 0 && v != "." {
+			if len(v) > 0 {
 				src = sourceObj.Path(v)
 				if src.Data() == nil {
 					continue
 				}
 			}
-			if len(k) > 0 && k != "." {
-				destObj.SetP(src.Data(), k)
+			srcData, _ := message.CopyJSON(src.Data())
+			if len(k) > 0 {
+				destObj.SetP(srcData, k)
 			} else {
-				destObj = src
+				destObj, _ = gabs.Consume(srcData)
 			}
 		}
 
-		mappedMsg.Append(message.NewPart([]byte("{}")))
+		mappedMsg.Append(message.NewPart(nil))
 		if err = mappedMsg.Get(-1).SetJSON(destObj.Data()); err != nil {
 			t.mReqErr.Incr(1)
 			t.mReqErrJSON.Incr(1)
-			t.log.Debugf("Failed to marshal request map result in message part '%v'. Map contents: '%v'\n", i, destObj.String())
+			t.log.Errorf("Failed to marshal request map result in message part '%v'. Map contents: '%v'\n", i, destObj.String())
+			failed = append(failed, i)
+		} else {
+			mappedMsg.Get(-1).SetMetadata(msg.Get(i).Metadata().Copy())
 		}
-		t.log.Tracef("Mapped request part '%v': %q\n", i, mappedMsg.Get(-1).Get())
 	}
 
-	return mappedMsg, skipped, nil
+	return
 }
 
 // AlignResult takes the original length of a mapped payload, a slice of skipped
-// message part indexes, and a post-mapped, post-processed slice of resuling
-// messages, and attempts to create a new payload where the results are
-// realigned and ready to map back into the original.
-func (t *Type) AlignResult(length int, skippedParts []int, result []types.Message) (types.Message, error) {
+// message part indexes, a slice of failed message part indexes, and a
+// post-mapped, post-processed slice of resuling messages, and attempts to
+// create a new payload where the results are realigned and ready to map back
+// into the original.
+func (t *Type) AlignResult(length int, skipped, failed []int, result []types.Message) (types.Message, error) {
 	resMsgParts := []types.Part{}
 	for _, m := range result {
 		m.Iter(func(i int, p types.Part) error {
@@ -351,20 +360,26 @@ func (t *Type) AlignResult(length int, skippedParts []int, result []types.Messag
 		})
 	}
 
+	skippedOrFailed := make([]int, len(skipped)+len(failed))
+	i := copy(skippedOrFailed, skipped)
+	copy(skippedOrFailed[i:], failed)
+
+	sort.Ints(skippedOrFailed)
+
 	// Check that size of response is aligned with payload.
-	if rLen, pLen := len(resMsgParts)+len(skippedParts), length; rLen != pLen {
+	if rLen, pLen := len(resMsgParts)+len(skippedOrFailed), length; rLen != pLen {
 		return nil, fmt.Errorf("parts returned from enrichment do not match payload: %v != %v", rLen, pLen)
 	}
 
 	var responseParts []types.Part
-	if len(skippedParts) == 0 {
+	if len(skippedOrFailed) == 0 {
 		responseParts = resMsgParts
 	} else {
 		// Remember to insert nil for each skipped part at the correct index.
 		responseParts = make([]types.Part, length)
 		sIndex := 0
-		for i := 0; i < len(resMsgParts); i++ {
-			for sIndex < len(skippedParts) && skippedParts[sIndex] == (i+sIndex) {
+		for i = 0; i < len(resMsgParts); i++ {
+			for sIndex < len(skippedOrFailed) && skippedOrFailed[sIndex] == (i+sIndex) {
 				sIndex++
 			}
 			responseParts[i+sIndex] = resMsgParts[i]
@@ -383,20 +398,44 @@ func (t *Type) AlignResult(length int, skippedParts []int, result []types.Messag
 // payload. If parts were removed from the enrichment request the original
 // contents must be interlaced back within the response object before calling
 // the overlay.
-func (t *Type) MapResponses(payload, response types.Message) error {
+//
+// Returns an array of message indexes that failed their map stage, or an error.
+func (t *Type) MapResponses(payload, response types.Message) ([]int, error) {
 	if exp, act := payload.Len(), response.Len(); exp != act {
 		t.mResErr.Incr(1)
 		t.mResErrParts.Incr(1)
-		return fmt.Errorf("payload message counts have diverged from the request and response: %v != %v", act, exp)
+		return nil, fmt.Errorf("payload message counts have diverged from the request and response: %v != %v", act, exp)
 	}
+
+	var failed []int
+
+	parts := make([]types.Part, payload.Len())
+	payload.Iter(func(i int, p types.Part) error {
+		parts[i] = p
+		return nil
+	})
 
 partLoop:
 	for i := 0; i < response.Len(); i++ {
-		if response.Get(i).Get() == nil {
+		if response.Get(i).IsEmpty() {
 			// Parts that are nil are skipped.
 			continue partLoop
 		}
-		t.log.Tracef("Premapped response part '%v': %q\n", i, response.Get(i).Get())
+
+		if len(t.resMap) == 0 && len(t.resOptMap) == 0 {
+			newPart := response.Get(i).Copy()
+
+			// Overwrite payload parts with new parts metadata.
+			metadata := parts[i].Metadata()
+			newPart.Metadata().Iter(func(k, v string) error {
+				metadata.Set(k, v)
+				return nil
+			})
+
+			newPart.SetMetadata(metadata)
+			parts[i] = newPart
+			continue partLoop
+		}
 
 		sourceObj, err := getGabs(response, i)
 		if err != nil {
@@ -405,7 +444,21 @@ partLoop:
 			t.log.Debugf("Failed to parse response part '%v': %v. Failed part: '%s'\n", i, err, response.Get(i).Get())
 
 			// Skip parts that fail JSON parse.
+			failed = append(failed, i)
 			continue partLoop
+		}
+
+		// Check all mandatory map targets before proceeding.
+		for _, k := range t.resTargets {
+			if v := t.resMap[k]; len(v) > 0 && sourceObj.Path(v).Data() == nil {
+				t.mResErr.Incr(1)
+				t.mResErrMap.Incr(1)
+				t.log.Debugf("Failed to find map target '%v' in response part '%v'.\n", v, i)
+
+				// Skip parts that fail mapping.
+				failed = append(failed, i)
+				continue partLoop
+			}
 		}
 
 		var destObj *gabs.Container
@@ -415,59 +468,58 @@ partLoop:
 			t.log.Debugf("Failed to parse payload part '%v': %v. Failed part: '%s'\n", i, err, response.Get(i).Get())
 
 			// Skip parts that fail JSON parse.
+			failed = append(failed, i)
 			continue partLoop
 		}
 
-		if len(t.resMap) == 0 && len(t.resOptMap) == 0 {
-			destObj = sourceObj
-		}
-		for k, v := range t.resMap {
+		for _, k := range t.resTargets {
+			v := t.resMap[k]
 			src := sourceObj
-			if len(v) > 0 && v != "." {
+			if len(v) > 0 {
 				src = sourceObj.Path(v)
-				if src.Data() == nil {
-					t.mResErr.Incr(1)
-					t.mResErrMap.Incr(1)
-					t.log.Debugf("Failed to find map target '%v' in response part '%v'. Response contents: %q\n", v, i, response.Get(i).Get())
-
-					// Skip parts that fail mapping.
-					continue partLoop
-				}
 			}
-			if len(k) > 0 && k != "." {
+			if len(k) > 0 {
 				destObj.SetP(src.Data(), k)
 			} else {
 				destObj = src
 			}
 		}
-		for k, v := range t.resOptMap {
+		for _, k := range t.resOptTargets {
+			v := t.resOptMap[k]
 			src := sourceObj
-			if len(v) > 0 && v != "." {
+			if len(v) > 0 {
 				src = sourceObj.Path(v)
 				if src.Data() == nil {
 					continue
 				}
 			}
-			if len(k) > 0 && k != "." {
+			if len(k) > 0 {
 				destObj.SetP(src.Data(), k)
 			} else {
 				destObj = src
 			}
 		}
 
-		if err = payload.Get(i).SetJSON(destObj.Data()); err != nil {
+		if err = parts[i].SetJSON(destObj.Data()); err != nil {
 			t.mResErr.Incr(1)
 			t.mResErrJSON.Incr(1)
 			t.log.Debugf("Failed to marshal response map result in message part '%v'. Map contents: '%v'\n", i, destObj.String())
 
 			// Skip parts that fail mapping.
+			failed = append(failed, i)
 			continue partLoop
 		}
 
-		t.log.Tracef("Mapped message part '%v': %q\n", i, payload.Get(i).Get())
+		metadata := parts[i].Metadata()
+		response.Get(i).Metadata().Iter(func(k, v string) error {
+			metadata.Set(k, v)
+			return nil
+		})
+		parts[i].SetMetadata(metadata)
 	}
 
-	return nil
+	payload.SetAll(parts)
+	return failed, nil
 }
 
 //------------------------------------------------------------------------------

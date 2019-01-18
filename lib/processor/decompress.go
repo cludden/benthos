@@ -28,6 +28,7 @@ import (
 	"compress/zlib"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -41,11 +42,8 @@ func init() {
 	Constructors[TypeDecompress] = TypeSpec{
 		constructor: NewDecompress,
 		description: `
-Decompresses message parts according to the selected algorithm. Supported
-decompression types are: gzip, zlib, bzip2, flate.
-
-Parts that fail to decompress (invalid format) will be removed from the message.
-If the message results in zero parts it is skipped entirely.`,
+Decompresses messages according to the selected algorithm. Supported
+decompression types are: gzip, zlib, bzip2, flate.`,
 	}
 }
 
@@ -148,11 +146,9 @@ type Decompress struct {
 	stats metrics.Type
 
 	mCount     metrics.StatCounter
-	mSucc      metrics.StatCounter
 	mErr       metrics.StatCounter
-	mSkipped   metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewDecompress returns a Decompress processor.
@@ -166,15 +162,13 @@ func NewDecompress(
 	return &Decompress{
 		conf:   conf.Decompress,
 		decomp: dcor,
-		log:    log.NewModule(".processor.decompress"),
+		log:    log,
 		stats:  stats,
 
-		mCount:     stats.GetCounter("processor.decompress.count"),
-		mSucc:      stats.GetCounter("processor.decompress.success"),
-		mErr:       stats.GetCounter("processor.decompress.error"),
-		mSkipped:   stats.GetCounter("processor.decompress.skipped"),
-		mSent:      stats.GetCounter("processor.decompress.sent"),
-		mSentParts: stats.GetCounter("processor.decompress.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -184,37 +178,47 @@ func NewDecompress(
 // resulting messages or a response to be sent back to the message source.
 func (d *Decompress) ProcessMessage(msg types.Message) ([]types.Message, types.Response) {
 	d.mCount.Incr(1)
-
 	newMsg := msg.Copy()
 
-	targetParts := d.conf.Parts
-	if len(targetParts) == 0 {
-		targetParts = make([]int, newMsg.Len())
-		for i := range targetParts {
-			targetParts[i] = i
-		}
-	}
-
-	for _, index := range targetParts {
+	proc := func(index int) {
 		part := msg.Get(index).Get()
 		newPart, err := d.decomp(part)
 		if err == nil {
-			d.mSucc.Incr(1)
 			newMsg.Get(index).Set(newPart)
 		} else {
 			d.mErr.Incr(1)
+			d.log.Errorf("Failed to decompress message part: %v\n", err)
+			FlagFail(newMsg.Get(index))
+		}
+	}
+
+	if len(d.conf.Parts) == 0 {
+		for i := 0; i < msg.Len(); i++ {
+			proc(i)
+		}
+	} else {
+		for _, i := range d.conf.Parts {
+			proc(i)
 		}
 	}
 
 	if newMsg.Len() == 0 {
-		d.mSkipped.Incr(1)
 		return nil, response.NewAck()
 	}
 
-	d.mSent.Incr(1)
-	d.mSentParts.Incr(int64(newMsg.Len()))
+	d.mBatchSent.Incr(1)
+	d.mSent.Incr(int64(newMsg.Len()))
 	msgs := [1]types.Message{newMsg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (d *Decompress) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (d *Decompress) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

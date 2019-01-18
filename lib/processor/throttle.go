@@ -72,7 +72,7 @@ type Throttle struct {
 
 	mCount     metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewThrottle returns a Throttle processor.
@@ -81,12 +81,12 @@ func NewThrottle(
 ) (Type, error) {
 	t := &Throttle{
 		conf:  conf,
-		log:   log.NewModule(".processor.throttle"),
+		log:   log,
 		stats: stats,
 
-		mCount:     stats.GetCounter("processor.throttle.count"),
-		mSent:      stats.GetCounter("processor.throttle.sent"),
-		mSentParts: stats.GetCounter("processor.throttle.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}
 
 	var err error
@@ -110,10 +110,19 @@ func (m *Throttle) ProcessMessage(msg types.Message) ([]types.Message, types.Res
 
 	m.lastBatch = time.Now()
 
-	m.mSent.Incr(1)
-	m.mSentParts.Incr(int64(msg.Len()))
+	m.mBatchSent.Incr(1)
+	m.mSent.Incr(int64(msg.Len()))
 	msgs := [1]types.Message{msg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (m *Throttle) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (m *Throttle) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

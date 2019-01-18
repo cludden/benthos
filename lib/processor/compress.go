@@ -26,6 +26,7 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"fmt"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -39,8 +40,8 @@ func init() {
 	Constructors[TypeCompress] = TypeSpec{
 		constructor: NewCompress,
 		description: `
-Compresses parts of a message according to the selected algorithm. Supported
-compression types are: gzip, zlib, flate.
+Compresses messages according to the selected algorithm. Supported compression
+algorithms are: gzip, zlib, flate.
 
 The 'level' field might not apply to all algorithms.`,
 	}
@@ -134,11 +135,9 @@ type Compress struct {
 	stats metrics.Type
 
 	mCount     metrics.StatCounter
-	mSucc      metrics.StatCounter
 	mErr       metrics.StatCounter
-	mSkipped   metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewCompress returns a Compress processor.
@@ -152,15 +151,13 @@ func NewCompress(
 	return &Compress{
 		conf:  conf.Compress,
 		comp:  cor,
-		log:   log.NewModule(".processor.compress"),
+		log:   log,
 		stats: stats,
 
-		mCount:     stats.GetCounter("processor.compress.count"),
-		mSucc:      stats.GetCounter("processor.compress.success"),
-		mErr:       stats.GetCounter("processor.compress.error"),
-		mSkipped:   stats.GetCounter("processor.compress.skipped"),
-		mSent:      stats.GetCounter("processor.compress.sent"),
-		mSentParts: stats.GetCounter("processor.compress.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -170,38 +167,47 @@ func NewCompress(
 // resulting messages or a response to be sent back to the message source.
 func (c *Compress) ProcessMessage(msg types.Message) ([]types.Message, types.Response) {
 	c.mCount.Incr(1)
-
 	newMsg := msg.Copy()
 
-	targetParts := c.conf.Parts
-	if len(targetParts) == 0 {
-		targetParts = make([]int, newMsg.Len())
-		for i := range targetParts {
-			targetParts[i] = i
-		}
-	}
-
-	for _, index := range targetParts {
-		part := msg.Get(index).Get()
+	proc := func(i int) {
+		part := msg.Get(i).Get()
 		newPart, err := c.comp(c.conf.Level, part)
 		if err == nil {
-			c.mSucc.Incr(1)
-			newMsg.Get(index).Set(newPart)
+			newMsg.Get(i).Set(newPart)
 		} else {
 			c.log.Errorf("Failed to compress message part: %v\n", err)
 			c.mErr.Incr(1)
+			FlagFail(newMsg.Get(i))
+		}
+	}
+
+	if len(c.conf.Parts) == 0 {
+		for i := 0; i < msg.Len(); i++ {
+			proc(i)
+		}
+	} else {
+		for _, i := range c.conf.Parts {
+			proc(i)
 		}
 	}
 
 	if newMsg.Len() == 0 {
-		c.mSkipped.Incr(1)
 		return nil, response.NewAck()
 	}
 
-	c.mSent.Incr(1)
-	c.mSentParts.Incr(int64(newMsg.Len()))
+	c.mBatchSent.Incr(1)
+	c.mSent.Incr(int64(newMsg.Len()))
 	msgs := [1]types.Message{newMsg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (c *Compress) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (c *Compress) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

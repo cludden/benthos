@@ -25,6 +25,7 @@ import (
 	"crypto/sha512"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -39,8 +40,8 @@ func init() {
 	Constructors[TypeHash] = TypeSpec{
 		constructor: NewHash,
 		description: `
-Hashes parts of a message according to the selected algorithm. Supported
-algorithms are: sha256, sha512, xxhash64.
+Hashes messages according to the selected algorithm. Supported algorithms are:
+sha256, sha512, xxhash64.
 
 This processor is mostly useful when combined with the
 ` + "[`process_field`](#process_field)" + ` processor as it allows you to hash a
@@ -120,11 +121,9 @@ type Hash struct {
 	stats metrics.Type
 
 	mCount     metrics.StatCounter
-	mSucc      metrics.StatCounter
 	mErr       metrics.StatCounter
-	mSkipped   metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewHash returns a Hash processor.
@@ -138,15 +137,13 @@ func NewHash(
 	return &Hash{
 		conf:  conf.Hash,
 		fn:    cor,
-		log:   log.NewModule(".processor.hash"),
+		log:   log,
 		stats: stats,
 
-		mCount:     stats.GetCounter("processor.hash.count"),
-		mSucc:      stats.GetCounter("processor.hash.success"),
-		mErr:       stats.GetCounter("processor.hash.error"),
-		mSkipped:   stats.GetCounter("processor.hash.skipped"),
-		mSent:      stats.GetCounter("processor.hash.sent"),
-		mSentParts: stats.GetCounter("processor.hash.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}, nil
 }
 
@@ -163,11 +160,11 @@ func (c *Hash) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 		part := msg.Get(index).Get()
 		newPart, err := c.fn(part)
 		if err == nil {
-			c.mSucc.Incr(1)
 			newMsg.Get(index).Set(newPart)
 		} else {
 			c.log.Debugf("Failed to hash message part: %v\n", err)
 			c.mErr.Incr(1)
+			FlagFail(msg.Get(index))
 		}
 	}
 
@@ -176,20 +173,28 @@ func (c *Hash) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 			proc(i)
 		}
 	} else {
-		for _, index := range c.conf.Parts {
-			proc(index)
+		for _, i := range c.conf.Parts {
+			proc(i)
 		}
 	}
 
 	if newMsg.Len() == 0 {
-		c.mSkipped.Incr(1)
 		return nil, response.NewAck()
 	}
 
-	c.mSent.Incr(1)
-	c.mSentParts.Incr(int64(newMsg.Len()))
+	c.mBatchSent.Incr(1)
+	c.mSent.Incr(int64(newMsg.Len()))
 	msgs := [1]types.Message{newMsg}
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (c *Hash) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (c *Hash) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

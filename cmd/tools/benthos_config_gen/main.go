@@ -30,107 +30,16 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Jeffail/benthos/lib/api"
-	"github.com/Jeffail/benthos/lib/buffer"
+	"github.com/Jeffail/benthos/lib/config"
 	"github.com/Jeffail/benthos/lib/input"
 	"github.com/Jeffail/benthos/lib/log"
-	"github.com/Jeffail/benthos/lib/manager"
 	"github.com/Jeffail/benthos/lib/metrics"
 	"github.com/Jeffail/benthos/lib/output"
 	"github.com/Jeffail/benthos/lib/pipeline"
 	"github.com/Jeffail/benthos/lib/processor"
+	"github.com/Jeffail/benthos/lib/processor/condition"
 	yaml "gopkg.in/yaml.v2"
 )
-
-//------------------------------------------------------------------------------
-
-// Config is the benthos configuration struct.
-type Config struct {
-	HTTP     api.Config      `json:"http" yaml:"http"`
-	Input    input.Config    `json:"input" yaml:"input"`
-	Buffer   buffer.Config   `json:"buffer" yaml:"buffer"`
-	Pipeline pipeline.Config `json:"pipeline" yaml:"pipeline"`
-	Output   output.Config   `json:"output" yaml:"output"`
-	Manager  manager.Config  `json:"resources" yaml:"resources"`
-	Logger   log.Config      `json:"logger" yaml:"logger"`
-	Metrics  metrics.Config  `json:"metrics" yaml:"metrics"`
-}
-
-// NewConfig returns a new configuration with default values.
-func NewConfig() Config {
-	return Config{
-		HTTP:     api.NewConfig(),
-		Input:    input.NewConfig(),
-		Buffer:   buffer.NewConfig(),
-		Pipeline: pipeline.NewConfig(),
-		Output:   output.NewConfig(),
-		Manager:  manager.NewConfig(),
-		Logger:   log.NewConfig(),
-		Metrics:  metrics.NewConfig(),
-	}
-}
-
-// Sanitised returns a sanitised copy of the Benthos configuration, meaning
-// fields of no consequence (unused inputs, outputs, processors etc) are
-// excluded.
-func (c Config) Sanitised(sanitBuffer, sanitPipe bool) (interface{}, error) {
-	inConf, err := input.SanitiseConfig(c.Input)
-	if err != nil {
-		return nil, err
-	}
-
-	var bufConf interface{}
-	if sanitBuffer {
-		bufConf, err = buffer.SanitiseConfig(c.Buffer)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		bufConf = c.Buffer
-	}
-
-	var pipeConf interface{}
-	if sanitPipe {
-		pipeConf, err = pipeline.SanitiseConfig(c.Pipeline)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		pipeConf = c.Pipeline
-	}
-
-	var outConf interface{}
-	outConf, err = output.SanitiseConfig(c.Output)
-	if err != nil {
-		return nil, err
-	}
-
-	var mgrConf interface{}
-	mgrConf, err = manager.SanitiseConfig(c.Manager)
-	if err != nil {
-		return nil, err
-	}
-
-	return struct {
-		HTTP     interface{} `json:"http" yaml:"http"`
-		Input    interface{} `json:"input" yaml:"input"`
-		Buffer   interface{} `json:"buffer" yaml:"buffer"`
-		Pipeline interface{} `json:"pipeline" yaml:"pipeline"`
-		Output   interface{} `json:"output" yaml:"output"`
-		Manager  interface{} `json:"resources" yaml:"resources"`
-		Logger   interface{} `json:"logger" yaml:"logger"`
-		Metrics  interface{} `json:"metrics" yaml:"metrics"`
-	}{
-		HTTP:     c.HTTP,
-		Input:    inConf,
-		Buffer:   bufConf,
-		Pipeline: pipeConf,
-		Output:   outConf,
-		Manager:  mgrConf,
-		Logger:   c.Logger,
-		Metrics:  c.Metrics,
-	}, nil
-}
 
 //------------------------------------------------------------------------------
 
@@ -188,13 +97,17 @@ func envify(rootPath string, conf interface{}, paths map[string]string) (newConf
 	}
 	blacklist := []string{
 		"READ_UNTIL",
+		"OUTPUT_BROKER_OUTPUTS_RETRY",
 		"CONDITIONAL",
 		"PROCESS_FIELD",
 		"PROCESS_MAP",
+		"CHECK_FIELD",
 		"FILTER",
 		"DEDUPE",
 		"INPUT_BROKER_INPUTS_BROKER",
 		"OUTPUT_BROKER_OUTPUTS_BROKER",
+		"OUTPUT_BROKER_OUTPUTS_DYNAMODB",
+		"LOGGER_STATIC_FIELDS",
 	}
 	aliases := map[string]string{
 		"INPUT_BROKER_INPUTS":   "INPUT",
@@ -420,8 +333,7 @@ func createEnvConf(configsDir string) {
 		Outputs: []interface{}{outConf},
 	}
 
-	conf := NewConfig()
-
+	conf := config.New()
 	envConf := struct {
 		HTTP     interface{} `json:"http"`
 		Input    interface{} `json:"input"`
@@ -481,7 +393,7 @@ func main() {
 
 	// Generate configs for all types.
 	for t := range typeMap {
-		conf := NewConfig()
+		conf := config.New()
 		conf.Input.Processors = nil
 		conf.Output.Processors = nil
 		conf.Pipeline.Processors = nil
@@ -493,7 +405,7 @@ func main() {
 			conf.Output.Type = t
 		}
 
-		sanit, err := conf.Sanitised(true, true)
+		sanit, err := conf.Sanitised()
 		if err != nil {
 			panic(err)
 		}
@@ -504,7 +416,7 @@ func main() {
 
 	// Create processor configs for all types.
 	for t := range processor.Constructors {
-		conf := NewConfig()
+		conf := config.New()
 		conf.Input.Processors = nil
 		conf.Output.Processors = nil
 
@@ -513,7 +425,7 @@ func main() {
 
 		conf.Pipeline.Processors = append(conf.Pipeline.Processors, procConf)
 
-		sanit, err := conf.Sanitised(true, true)
+		sanit, err := conf.Sanitised()
 		if err != nil {
 			panic(err)
 		}
@@ -522,18 +434,63 @@ func main() {
 		createJSON(t, filepath.Join(configsDir, "processors", t+".json"), sanit)
 	}
 
+	// Create condition configs for all types.
+	for t := range condition.Constructors {
+		conf := config.New()
+		conf.Input.Processors = nil
+		conf.Output.Processors = nil
+
+		condConf := condition.NewConfig()
+		condConf.Type = t
+
+		procConf := processor.NewConfig()
+		procConf.Type = "filter_parts"
+		procConf.FilterParts = processor.FilterPartsConfig{
+			Config: condConf,
+		}
+
+		conf.Pipeline.Processors = append(conf.Pipeline.Processors, procConf)
+
+		sanit, err := conf.Sanitised()
+		if err != nil {
+			panic(err)
+		}
+
+		createYAML(t, filepath.Join(configsDir, "conditions", t+".yaml"), sanit)
+		createJSON(t, filepath.Join(configsDir, "conditions", t+".json"), sanit)
+	}
+
 	// Create buffers config
 	{
 		t := "buffers"
 
-		conf := NewConfig()
+		conf := config.New()
 		conf.Input.Processors = nil
 		conf.Output.Processors = nil
 
-		sanit, err := conf.Sanitised(false, true)
+		sanit, err := conf.Sanitised()
 		if err != nil {
 			panic(err)
 		}
+		sanit.Buffer = conf.Buffer
+
+		createYAML(t, filepath.Join(configsDir, t+".yaml"), sanit)
+		createJSON(t, filepath.Join(configsDir, t+".json"), sanit)
+	}
+
+	// Create metrics config
+	{
+		t := "metrics"
+
+		conf := config.New()
+		conf.Input.Processors = nil
+		conf.Output.Processors = nil
+
+		sanit, err := conf.Sanitised()
+		if err != nil {
+			panic(err)
+		}
+		sanit.Metrics = conf.Metrics
 
 		createYAML(t, filepath.Join(configsDir, t+".yaml"), sanit)
 		createJSON(t, filepath.Join(configsDir, t+".json"), sanit)

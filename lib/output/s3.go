@@ -34,9 +34,10 @@ func init() {
 		constructor: NewAmazonS3,
 		description: `
 Sends message parts as objects to an Amazon S3 bucket. Each object is uploaded
-with the path specified with the 'path' field, in order to have a different path
-for each object you should use function interpolations described
-[here](../config_interpolation.md#functions).`,
+with the path specified with the ` + "`path`" + ` field. In order to have a
+different path for each object you should use function interpolations described
+[here](../config_interpolation.md#functions), which are calculated per message
+of a batch.`,
 	}
 }
 
@@ -44,8 +45,12 @@ for each object you should use function interpolations described
 
 // NewAmazonS3 creates a new AmazonS3 output type.
 func NewAmazonS3(conf Config, mgr types.Manager, log log.Modular, stats metrics.Type) (Type, error) {
+	sthree, err := writer.NewAmazonS3(conf.S3, log, stats)
+	if err != nil {
+		return nil, err
+	}
 	return NewWriter(
-		"s3", writer.NewAmazonS3(conf.S3, log, stats), log, stats,
+		"s3", sthree, log, stats,
 	)
 }
 

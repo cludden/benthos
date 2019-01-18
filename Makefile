@@ -1,4 +1,4 @@
-.PHONY: all deps rpm docker clean docs test test-race test-integration fmt lint install docker-zmq
+.PHONY: all deps rpm docker docker-deps docker-zmq docker-push clean docs test test-race test-integration fmt lint install
 
 TAGS =
 
@@ -7,13 +7,17 @@ DEST_DIR       = ./target
 PATHINSTBIN    = $(DEST_DIR)/bin
 PATHINSTDOCKER = $(DEST_DIR)/docker
 
-VERSION := $(shell git describe --tags || echo "v0.0.0")
-DATE    := $(shell date +"%Y-%m-%dT%H:%M:%SZ")
+VERSION   := $(shell git describe --tags || echo "v0.0.0")
+VER_MAJOR := $(shell echo $(VERSION) | cut -f1 -d.)
+VER_MINOR := $(shell echo $(VERSION) | cut -f2 -d.)
+VER_PATCH := $(shell echo $(VERSION) | cut -f3 -d.)
+DATE      := $(shell date +"%Y-%m-%dT%H:%M:%SZ")
 
 VER_FLAGS = -X main.Version=$(VERSION) \
 	-X main.DateBuilt=$(DATE)
 
 LD_FLAGS =
+GO_FLAGS =
 
 APPS = benthos
 all: $(APPS)
@@ -23,39 +27,49 @@ install: $(APPS)
 
 $(PATHINSTBIN)/%: $(wildcard lib/*/*.go lib/*/*/*.go lib/*/*/*/*.go cmd/*/*.go)
 	@mkdir -p $(dir $@)
-	@go build -tags "$(TAGS)" -ldflags "$(LD_FLAGS) $(VER_FLAGS)" -o $@ ./cmd/$*
+	@go build $(GO_FLAGS) -tags "$(TAGS)" -ldflags "$(LD_FLAGS) $(VER_FLAGS)" -o $@ ./cmd/$*
 
 $(APPS): %: $(PATHINSTBIN)/%
 
 docker:
-	@docker rmi jeffail/benthos:$(VERSION); true
 	@docker build -f ./resources/docker/Dockerfile . -t jeffail/benthos:$(VERSION)
-	@docker rmi jeffail/benthos:latest; true
+	@docker tag jeffail/benthos:$(VERSION) jeffail/benthos:$(VER_MAJOR)
+	@docker tag jeffail/benthos:$(VERSION) jeffail/benthos:$(VER_MAJOR).$(VER_MINOR)
 	@docker tag jeffail/benthos:$(VERSION) jeffail/benthos:latest
 
-docker-zmq:
-	@docker rmi jeffail/benthos:$(VERSION)-zmq; true
-	@docker build -f ./resources/docker/Dockerfile.zmq . -t jeffail/benthos:$(VERSION)-zmq
+docker-deps:
+	@docker build -f ./resources/docker/Dockerfile --target deps . -t jeffail/benthos:$(VERSION)-deps
+	@docker tag jeffail/benthos:$(VERSION)-deps jeffail/benthos:latest-deps
 
-deps:
-	@go get github.com/golang/dep/cmd/dep
-	@$$GOPATH/bin/dep ensure
+docker-zmq:
+	@docker build -f ./resources/docker/Dockerfile.zmq . -t jeffail/benthos:$(VERSION)-zmq
+	@docker tag jeffail/benthos:$(VERSION)-zmq jeffail/benthos:latest-zmq
+
+docker-push:
+	@docker push jeffail/benthos:$(VERSION)-deps; true
+	@docker push jeffail/benthos:latest-deps; true
+	@docker push jeffail/benthos:$(VERSION)-zmq; true
+	@docker push jeffail/benthos:latest-zmq; true
+	@docker push jeffail/benthos:$(VERSION); true
+	@docker push jeffail/benthos:$(VER_MAJOR); true
+	@docker push jeffail/benthos:$(VER_MAJOR).$(VER_MINOR); true
+	@docker push jeffail/benthos:latest; true
 
 fmt:
-	@go list ./... | xargs -I{} gofmt -w -s $$GOPATH/src/{}
+	@go list -f {{.Dir}} ./... | xargs -I{} gofmt -w -s {}
 
 lint:
-	@go vet ./...
+	@go vet $(GO_FLAGS) ./...
 	@golint -min_confidence 0.5 ./cmd/... ./lib/...
 
 test:
-	@go test -short ./...
+	@go test $(GO_FLAGS) -short ./...
 
 test-race:
-	@go test -short -race ./...
+	@go test $(GO_FLAGS) -short -race ./...
 
 test-integration:
-	@go test -timeout 300s ./...
+	@go test $(GO_FLAGS) -timeout 600s ./...
 
 clean:
 	rm -rf $(PATHINSTBIN)
@@ -70,4 +84,5 @@ docs: $(APPS)
 	@$(PATHINSTBIN)/benthos --list-buffers > ./docs/buffers/README.md; true
 	@$(PATHINSTBIN)/benthos --list-outputs > ./docs/outputs/README.md; true
 	@$(PATHINSTBIN)/benthos --list-caches > ./docs/caches/README.md; true
-	@go run ./cmd/tools/benthos_config_gen/main.go
+	@$(PATHINSTBIN)/benthos --list-rate-limits > ./docs/rate_limits/README.md; true
+	@go run $(GO_FLAGS) ./cmd/tools/benthos_config_gen/main.go

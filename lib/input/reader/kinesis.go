@@ -29,9 +29,8 @@ import (
 	"github.com/Jeffail/benthos/lib/message"
 	"github.com/Jeffail/benthos/lib/metrics"
 	"github.com/Jeffail/benthos/lib/types"
+	sess "github.com/Jeffail/benthos/lib/util/aws/session"
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
@@ -42,36 +41,29 @@ import (
 
 // KinesisConfig is configuration values for the input type.
 type KinesisConfig struct {
-	Region          string                     `json:"region" yaml:"region"`
-	Credentials     AmazonAWSCredentialsConfig `json:"credentials" yaml:"credentials"`
-	Limit           int64                      `json:"limit" yaml:"limit"`
-	Stream          string                     `json:"stream" yaml:"stream"`
-	Shard           string                     `json:"shard" yaml:"shard"`
-	DynamoDBTable   string                     `json:"dynamodb_table" yaml:"dynamodb_table"`
-	ClientID        string                     `json:"client_id" yaml:"client_id"`
-	CommitPeriodMS  int                        `json:"commit_period_ms" yaml:"commit_period_ms"`
-	StartFromOldest bool                       `json:"start_from_oldest" yaml:"start_from_oldest"`
-	TimeoutMS       int64                      `json:"timeout_ms" yaml:"timeout_ms"`
+	sess.Config     `json:",inline" yaml:",inline"`
+	Limit           int64  `json:"limit" yaml:"limit"`
+	Stream          string `json:"stream" yaml:"stream"`
+	Shard           string `json:"shard" yaml:"shard"`
+	DynamoDBTable   string `json:"dynamodb_table" yaml:"dynamodb_table"`
+	ClientID        string `json:"client_id" yaml:"client_id"`
+	CommitPeriod    string `json:"commit_period" yaml:"commit_period"`
+	StartFromOldest bool   `json:"start_from_oldest" yaml:"start_from_oldest"`
+	Timeout         string `json:"timeout" yaml:"timeout"`
 }
 
 // NewKinesisConfig creates a new Config with default values.
 func NewKinesisConfig() KinesisConfig {
 	return KinesisConfig{
-		Region: "eu-west-1",
-		Credentials: AmazonAWSCredentialsConfig{
-			ID:     "",
-			Secret: "",
-			Token:  "",
-			Role:   "",
-		},
+		Config:          sess.NewConfig(),
 		Limit:           100,
 		Stream:          "",
 		Shard:           "0",
 		DynamoDBTable:   "",
 		ClientID:        "benthos_consumer",
-		CommitPeriodMS:  1000,
+		CommitPeriod:    "1s",
 		StartFromOldest: true,
-		TimeoutMS:       5000,
+		Timeout:         "5s",
 	}
 }
 
@@ -87,11 +79,13 @@ type Kinesis struct {
 	dynamo  *dynamodb.DynamoDB
 
 	offsetLastCommitted time.Time
-	sharditerCommit     string
+	sequenceCommit      string
+	sequence            string
 	sharditer           string
 	namespace           string
 
-	timeout time.Duration
+	commitPeriod time.Duration
+	timeout      time.Duration
 
 	log   log.Modular
 	stats metrics.Type
@@ -102,50 +96,33 @@ func NewKinesis(
 	conf KinesisConfig,
 	log log.Modular,
 	stats metrics.Type,
-) *Kinesis {
-	return &Kinesis{
-		conf:      conf,
-		log:       log.NewModule(".input.kinesis"),
-		timeout:   time.Duration(conf.TimeoutMS) * time.Millisecond,
-		namespace: fmt.Sprintf("%v-%v", conf.ClientID, conf.Stream),
-		stats:     stats,
+) (*Kinesis, error) {
+	var timeout, commitPeriod time.Duration
+	if tout := conf.Timeout; len(tout) > 0 {
+		var err error
+		if timeout, err = time.ParseDuration(tout); err != nil {
+			return nil, fmt.Errorf("failed to parse timeout string: %v", err)
+		}
 	}
+	if tout := conf.CommitPeriod; len(tout) > 0 {
+		var err error
+		if commitPeriod, err = time.ParseDuration(tout); err != nil {
+			return nil, fmt.Errorf("failed to parse commit period string: %v", err)
+		}
+	}
+	return &Kinesis{
+		conf:         conf,
+		log:          log,
+		timeout:      timeout,
+		commitPeriod: commitPeriod,
+		namespace:    fmt.Sprintf("%v-%v", conf.ClientID, conf.Stream),
+		stats:        stats,
+	}, nil
 }
 
-// Connect attempts to establish a connection to the target SQS queue.
-func (k *Kinesis) Connect() error {
-	if k.session != nil {
-		return nil
-	}
-
-	awsConf := aws.NewConfig()
-	if len(k.conf.Region) > 0 {
-		awsConf = awsConf.WithRegion(k.conf.Region)
-	}
-	if len(k.conf.Credentials.ID) > 0 {
-		awsConf = awsConf.WithCredentials(credentials.NewStaticCredentials(
-			k.conf.Credentials.ID,
-			k.conf.Credentials.Secret,
-			k.conf.Credentials.Token,
-		))
-	}
-
-	sess, err := session.NewSession(awsConf)
-	if err != nil {
-		return err
-	}
-
-	if len(k.conf.Credentials.Role) > 0 {
-		sess.Config = sess.Config.WithCredentials(
-			stscreds.NewCredentials(sess, k.conf.Credentials.Role),
-		)
-	}
-
-	dynamo := dynamodb.New(sess)
-	kin := kinesis.New(sess)
-
-	if len(k.sharditer) == 0 && len(k.conf.DynamoDBTable) > 0 {
-		resp, err := dynamo.GetItemWithContext(
+func (k *Kinesis) getIter() error {
+	if len(k.sequenceCommit) == 0 && len(k.conf.DynamoDBTable) > 0 {
+		resp, err := k.dynamo.GetItemWithContext(
 			aws.BackgroundContext(),
 			&dynamodb.GetItemInput{
 				TableName:      aws.String(k.conf.DynamoDBTable),
@@ -167,10 +144,37 @@ func (k *Kinesis) Connect() error {
 			}
 			return err
 		}
-		if seqAttr := resp.Item["sequence_number"]; seqAttr != nil {
+		if seqAttr := resp.Item["sequence"]; seqAttr != nil {
 			if seqAttr.S != nil {
-				k.sharditer = *seqAttr.S
+				k.sequenceCommit = *seqAttr.S
+				k.sequence = *seqAttr.S
 			}
+		}
+	}
+
+	if len(k.sharditer) == 0 && len(k.sequence) > 0 {
+		getShardIter := kinesis.GetShardIteratorInput{
+			ShardId:                &k.conf.Shard,
+			StreamName:             &k.conf.Stream,
+			StartingSequenceNumber: &k.sequence,
+			ShardIteratorType:      aws.String(kinesis.ShardIteratorTypeAfterSequenceNumber),
+		}
+		res, err := k.kinesis.GetShardIteratorWithContext(
+			aws.BackgroundContext(),
+			&getShardIter,
+			request.WithResponseReadTimeout(k.timeout),
+		)
+		if err != nil {
+			if err.Error() == request.ErrCodeResponseTimeout {
+				return types.ErrTimeout
+			} else if err.Error() == kinesis.ErrCodeInvalidArgumentException {
+				k.log.Errorf("Failed to receive iterator from sequence number: %v\n", err.Error())
+			} else {
+				return err
+			}
+		}
+		if res.ShardIterator != nil {
+			k.sharditer = *res.ShardIterator
 		}
 	}
 
@@ -180,12 +184,16 @@ func (k *Kinesis) Connect() error {
 		if !k.conf.StartFromOldest {
 			iterType = kinesis.ShardIteratorTypeLatest
 		}
+		// If we failed to obtain from a sequence we start from beginning
+		if len(k.sequence) > 0 {
+			iterType = kinesis.ShardIteratorTypeTrimHorizon
+		}
 		getShardIter := kinesis.GetShardIteratorInput{
 			ShardId:           &k.conf.Shard,
 			StreamName:        &k.conf.Stream,
 			ShardIteratorType: &iterType,
 		}
-		res, err := kin.GetShardIteratorWithContext(
+		res, err := k.kinesis.GetShardIteratorWithContext(
 			aws.BackgroundContext(),
 			&getShardIter,
 			request.WithResponseReadTimeout(k.timeout),
@@ -196,21 +204,38 @@ func (k *Kinesis) Connect() error {
 			}
 			return err
 		}
-		if res.ShardIterator == nil {
-			return errors.New("received nil shard iterator")
+		if res.ShardIterator != nil {
+			k.sharditer = *res.ShardIterator
 		}
-		k.sharditer = *res.ShardIterator
 	}
 
 	if len(k.sharditer) == 0 {
 		return errors.New("failed to obtain shard iterator")
 	}
+	return nil
+}
 
-	k.sharditerCommit = k.sharditer
+// Connect attempts to establish a connection to the target SQS queue.
+func (k *Kinesis) Connect() error {
+	if k.session != nil {
+		return nil
+	}
 
-	k.kinesis = kin
-	k.dynamo = dynamo
+	sess, err := k.conf.GetSession()
+	if err != nil {
+		return err
+	}
+
+	k.dynamo = dynamodb.New(sess)
+	k.kinesis = kinesis.New(sess)
 	k.session = sess
+
+	if err = k.getIter(); err != nil {
+		k.dynamo = nil
+		k.kinesis = nil
+		k.session = nil
+		return err
+	}
 
 	k.log.Infof("Receiving Amazon Kinesis messages from stream: %v\n", k.conf.Stream)
 	return nil
@@ -220,6 +245,11 @@ func (k *Kinesis) Connect() error {
 func (k *Kinesis) Read() (types.Message, error) {
 	if k.session == nil {
 		return nil, types.ErrNotConnected
+	}
+	if len(k.sharditer) == 0 {
+		if err := k.getIter(); err != nil {
+			return nil, fmt.Errorf("failed to obtain iterator: %v", err)
+		}
 	}
 
 	getRecords := kinesis.GetRecordsInput{
@@ -234,8 +264,15 @@ func (k *Kinesis) Read() (types.Message, error) {
 	if err != nil {
 		if err.Error() == request.ErrCodeResponseTimeout {
 			return nil, types.ErrTimeout
+		} else if err.Error() == kinesis.ErrCodeExpiredIteratorException {
+			k.log.Warnln("Shard iterator expired, attempting to refresh")
+			return nil, types.ErrTimeout
 		}
 		return nil, err
+	}
+
+	if res.NextShardIterator != nil {
+		k.sharditer = *res.NextShardIterator
 	}
 
 	if len(res.Records) == 0 {
@@ -250,6 +287,9 @@ func (k *Kinesis) Read() (types.Message, error) {
 			part.Metadata().Set("kinesis_stream", k.conf.Stream)
 
 			msg.Append(part)
+			if rec.SequenceNumber != nil {
+				k.sequence = *rec.SequenceNumber
+			}
 		}
 	}
 
@@ -257,7 +297,6 @@ func (k *Kinesis) Read() (types.Message, error) {
 		return nil, types.ErrTimeout
 	}
 
-	k.sharditer = *res.NextShardIterator
 	return msg, nil
 }
 
@@ -277,8 +316,8 @@ func (k *Kinesis) commit() error {
 					"shard_id": {
 						S: aws.String(k.conf.Shard),
 					},
-					"sequence_number": {
-						S: aws.String(k.sharditerCommit),
+					"sequence": {
+						S: aws.String(k.sequenceCommit),
 					},
 				},
 			},
@@ -295,11 +334,10 @@ func (k *Kinesis) commit() error {
 // successfully propagated or not.
 func (k *Kinesis) Acknowledge(err error) error {
 	if err == nil {
-		k.sharditerCommit = k.sharditer
+		k.sequenceCommit = k.sequence
 	}
 
-	if time.Since(k.offsetLastCommitted) <
-		(time.Millisecond * time.Duration(k.conf.CommitPeriodMS)) {
+	if time.Since(k.offsetLastCommitted) < k.commitPeriod {
 		return nil
 	}
 

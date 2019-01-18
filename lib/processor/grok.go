@@ -22,6 +22,7 @@ package processor
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/Jeffail/benthos/lib/log"
 	"github.com/Jeffail/benthos/lib/metrics"
@@ -35,10 +36,10 @@ func init() {
 	Constructors[TypeGrok] = TypeSpec{
 		constructor: NewGrok,
 		description: `
-Parses a payload by attempting to apply a list of Grok patterns, if a pattern
-returns at least one value a resulting structured object is created according to
-the chosen output format and will replace the payload. Currently only json is a
-valid output format.
+Parses message payloads by attempting to apply a list of Grok patterns, if a
+pattern returns at least one value a resulting structured object is created
+according to the chosen output format and will replace the payload. Currently
+only json is a valid output format.
 
 This processor respects type hints in the grok patterns, therefore with the
 pattern ` + "`%{WORD:first},%{INT:second:int}`" + ` and a payload of ` + "`foo,1`" + `
@@ -85,9 +86,9 @@ type Grok struct {
 	mCount     metrics.StatCounter
 	mErrGrok   metrics.StatCounter
 	mErrJSONS  metrics.StatCounter
-	mSucc      metrics.StatCounter
+	mErr       metrics.StatCounter
 	mSent      metrics.StatCounter
-	mSentParts metrics.StatCounter
+	mBatchSent metrics.StatCounter
 }
 
 // NewGrok returns a Grok processor.
@@ -116,15 +117,15 @@ func NewGrok(
 		parts:    conf.Grok.Parts,
 		gparsers: compiled,
 		conf:     conf,
-		log:      log.NewModule(".processor.grok"),
+		log:      log,
 		stats:    stats,
 
-		mCount:     stats.GetCounter("processor.grok.count"),
-		mErrGrok:   stats.GetCounter("processor.grok.error.grok_no_matches"),
-		mErrJSONS:  stats.GetCounter("processor.grok.error.json_set"),
-		mSucc:      stats.GetCounter("processor.grok.success"),
-		mSent:      stats.GetCounter("processor.grok.sent"),
-		mSentParts: stats.GetCounter("processor.grok.parts.sent"),
+		mCount:     stats.GetCounter("count"),
+		mErrGrok:   stats.GetCounter("error.grok_no_matches"),
+		mErrJSONS:  stats.GetCounter("error.json_set"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}
 	return g, nil
 }
@@ -135,18 +136,9 @@ func NewGrok(
 // resulting messages or a response to be sent back to the message source.
 func (g *Grok) ProcessMessage(msg types.Message) ([]types.Message, types.Response) {
 	g.mCount.Incr(1)
-
 	newMsg := msg.Copy()
 
-	targetParts := g.parts
-	if len(targetParts) == 0 {
-		targetParts = make([]int, newMsg.Len())
-		for i := range targetParts {
-			targetParts[i] = i
-		}
-	}
-
-	for _, index := range targetParts {
+	proc := func(index int) {
 		body := msg.Get(index).Get()
 
 		var values map[string]interface{}
@@ -154,6 +146,7 @@ func (g *Grok) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 			var err error
 			if values, err = compiler.ParseTyped(body); err != nil {
 				g.log.Debugf("Failed to parse body: %v\n", err)
+				FlagFail(newMsg.Get(index))
 				continue
 			}
 			if len(values) > 0 {
@@ -163,23 +156,44 @@ func (g *Grok) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 
 		if len(values) == 0 {
 			g.mErrGrok.Incr(1)
+			g.mErr.Incr(1)
 			g.log.Debugf("No matches found for payload: %s\n", body)
-			continue
+			FlagFail(newMsg.Get(index))
+			return
 		}
 
 		if err := newMsg.Get(index).SetJSON(values); err != nil {
 			g.mErrJSONS.Incr(1)
+			g.mErr.Incr(1)
 			g.log.Debugf("Failed to convert grok result into json: %v\n", err)
-		} else {
-			g.mSucc.Incr(1)
+			FlagFail(newMsg.Get(index))
+		}
+	}
+
+	if len(g.parts) == 0 {
+		for i := 0; i < msg.Len(); i++ {
+			proc(i)
+		}
+	} else {
+		for _, i := range g.parts {
+			proc(i)
 		}
 	}
 
 	msgs := [1]types.Message{newMsg}
 
-	g.mSent.Incr(1)
-	g.mSentParts.Incr(int64(newMsg.Len()))
+	g.mBatchSent.Incr(1)
+	g.mSent.Incr(int64(newMsg.Len()))
 	return msgs[:], nil
+}
+
+// CloseAsync shuts down the processor and stops processing requests.
+func (g *Grok) CloseAsync() {
+}
+
+// WaitForClose blocks until the processor has closed down.
+func (g *Grok) WaitForClose(timeout time.Duration) error {
+	return nil
 }
 
 //------------------------------------------------------------------------------

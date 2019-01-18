@@ -1,7 +1,7 @@
 {
 	"http": {
 		"address": "0.0.0.0:4195",
-		"read_timeout_ms": 5000,
+		"read_timeout": "5s",
 		"root_path": "/benthos",
 		"debug_endpoints": false
 	},
@@ -20,7 +20,7 @@
 			"headers": {
 				"Content-Type": "application/octet-stream"
 			},
-			"max_retry_backoff_ms": 300000,
+			"max_retry_backoff": "300s",
 			"oauth": {
 				"access_token": "",
 				"access_token_secret": "",
@@ -30,8 +30,9 @@
 				"request_url": ""
 			},
 			"payload": "",
+			"rate_limit": "",
 			"retries": 3,
-			"retry_period_ms": 1000,
+			"retry_period": "1s",
 			"stream": {
 				"delimiter": "",
 				"enabled": false,
@@ -39,10 +40,11 @@
 				"multipart": false,
 				"reconnect": true
 			},
-			"timeout_ms": 5000,
+			"timeout": "5s",
 			"tls": {
-				"cas_file": "",
+				"client_certs": [],
 				"enabled": false,
+				"root_cas_file": "",
 				"skip_cert_verify": false
 			},
 			"url": "http://localhost:4195/get",
@@ -72,7 +74,7 @@
 			"headers": {
 				"Content-Type": "application/octet-stream"
 			},
-			"max_retry_backoff_ms": 300000,
+			"max_retry_backoff": "300s",
 			"oauth": {
 				"access_token": "",
 				"access_token_secret": "",
@@ -81,12 +83,14 @@
 				"enabled": false,
 				"request_url": ""
 			},
+			"rate_limit": "",
 			"retries": 3,
-			"retry_period_ms": 1000,
-			"timeout_ms": 5000,
+			"retry_period": "1s",
+			"timeout": "5s",
 			"tls": {
-				"cas_file": "",
+				"client_certs": [],
 				"enabled": false,
+				"root_cas_file": "",
 				"skip_cert_verify": false
 			},
 			"url": "http://localhost:4195/post",
@@ -95,23 +99,22 @@
 	},
 	"resources": {
 		"caches": {},
-		"conditions": {}
+		"conditions": {},
+		"rate_limits": {}
 	},
 	"logger": {
 		"prefix": "benthos",
 		"level": "INFO",
 		"add_timestamp": true,
-		"json_format": true
+		"json_format": true,
+		"static_fields": {
+			"@service": "benthos"
+		}
 	},
 	"metrics": {
 		"type": "http_server",
-		"prefix": "benthos",
 		"http_server": {},
-		"prometheus": {},
-		"statsd": {
-			"address": "localhost:4040",
-			"flush_period": "100ms",
-			"network": "udp"
-		}
-	}
+		"prefix": "benthos"
+	},
+	"shutdown_timeout": "20s"
 }
