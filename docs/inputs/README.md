@@ -50,18 +50,19 @@ level which is only applied to messages from the baz input.
 12. [`kafka_balanced`](#kafka_balanced)
 13. [`kinesis`](#kinesis)
 14. [`mqtt`](#mqtt)
-15. [`nanomsg`](#nanomsg)
-16. [`nats`](#nats)
-17. [`nats_stream`](#nats_stream)
-18. [`nsq`](#nsq)
-19. [`read_until`](#read_until)
-20. [`redis_list`](#redis_list)
-21. [`redis_pubsub`](#redis_pubsub)
-22. [`redis_streams`](#redis_streams)
-23. [`s3`](#s3)
-24. [`sqs`](#sqs)
-25. [`stdin`](#stdin)
-26. [`websocket`](#websocket)
+15. [`mysql`](#mysql)
+16. [`nanomsg`](#nanomsg)
+17. [`nats`](#nats)
+18. [`nats_stream`](#nats_stream)
+19. [`nsq`](#nsq)
+20. [`read_until`](#read_until)
+21. [`redis_list`](#redis_list)
+22. [`redis_pubsub`](#redis_pubsub)
+23. [`redis_streams`](#redis_streams)
+24. [`s3`](#s3)
+25. [`sqs`](#sqs)
+26. [`stdin`](#stdin)
+27. [`websocket`](#websocket)
 
 ## `amqp`
 
@@ -595,6 +596,101 @@ This input adds the following metadata fields to each message:
 
 You can access these metadata fields using
 [function interpolation](../config_interpolation.md#metadata).
+
+## `mysql`
+
+``` yaml
+type: mysql
+mysql:
+  batch_size: 0
+  buffer_timeout: ""
+  cache: ""
+  consumer_id: 0
+  databases: null
+  host: localhost
+  key_prefix: ""
+  latest: false
+  mysqldump_path: ""
+  password: ""
+  port: 3306
+  prefetch_count: 0
+  sync_interval: ""
+  tables: null
+  username: ""
+```
+
+Streams a MySQL binary replication log as a series of JSON events. Each event
+includes top level fields for the unique event id, schema name, table name, 
+event timestamp, event type, map of primary keys, and a row summary containing
+a before and after image of the row. A sample event is shown below:
+
+``` json
+{
+	"id": "mysql-bin.000003:670:test:foo:1",
+	"key": {
+		"id": 1
+	},
+	"row": {
+		"after": {
+			"created_at": "2018-08-23T21:32:05.839348Z",
+			"id": 1,
+			"title": "foo"
+		},
+		"before": {
+			"created_at": "2018-08-23T21:32:05.839348Z",
+			"id": 1,
+			"title": "bar"
+		}
+	},
+	"schema": "test",
+	"table": "foo",
+	"timestamp": "2018-08-23T15:32:05-06:00",
+	"type":"update"
+}
+``` json
+
+This input type requires a durable cache for persisting log file and
+offsets. It is also recommended to disable any cache TTL functionality.
+
+This input supports both single (default) and batch message types. To
+enable batch mode by setting the `batch_size` config field
+to a value that is greater than 1. When operating in batch mode, the 
+buffering window can be adjusted by tuning the `buffer_timeout`
+config field (default value is `1s`).
+
+### Starting Position & Content filters
+
+This input supports the following starting positions:
+- **last synchronized**
+	- The default starting position uses the last synchronized
+	checkpoint. This position will take priority over all others. To
+	disable, clear the cache for this consumer.
+- **dump**
+	- This method begins by dumping the current db(s) using `mysqldump`.
+	This requires the `mysqldump`executable to be available on the
+	current machine. To use this starting position, the `mysqldump_path`
+	config field must contain the path/to/mysqldump,
+- **latest**
+	- This method will begin streaming at the latest binlog position.
+	Enable this position using the `latest` config field.
+
+A list of databases to stream can be specified using the `databases`
+config field. A optional table filter can be specified using the `tables`
+config field as long as only a single database is specified.
+
+### Metadata
+
+This input adds the following metadata fields to each message:
+
+```
+- mysql_log_name
+- mysql_log_position
+- mysql_server_id
+```
+
+You can access these metadata fields using
+[function interpolation](../config_interpolation.md#metadata).
+	
 
 ## `nanomsg`
 
