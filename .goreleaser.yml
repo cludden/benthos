@@ -32,6 +32,6 @@ changelog:
       - .*
 release:
   github:
-    owner: Jeffail
+    owner: cludden
     name: benthos
   disable: false
