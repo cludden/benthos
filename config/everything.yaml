@@ -777,6 +777,21 @@ output:
       initial_interval: 1s
       max_interval: 5s
       max_elapsed_time: 30s
+  kinesis_firehose:
+    credentials:
+      id: ""
+      secret: ""
+      token: ""
+      role: ""
+      role_external_id: ""
+    endpoint: ""
+    region: ""
+    delivery_stream: ""
+    max_retries: 0
+    backoff:
+      initial_interval: ""
+      max_interval: ""
+      max_elapsed_time: ""
   mqtt:
     urls:
     - tcp://localhost:1883

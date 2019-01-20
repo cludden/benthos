@@ -43,20 +43,21 @@ a [`broker`](#broker) output with the 'try' pattern.
 13. [`inproc`](#inproc)
 14. [`kafka`](#kafka)
 15. [`kinesis`](#kinesis)
-16. [`mqtt`](#mqtt)
-17. [`nanomsg`](#nanomsg)
-18. [`nats`](#nats)
-19. [`nats_stream`](#nats_stream)
-20. [`nsq`](#nsq)
-21. [`redis_list`](#redis_list)
-22. [`redis_pubsub`](#redis_pubsub)
-23. [`redis_streams`](#redis_streams)
-24. [`retry`](#retry)
-25. [`s3`](#s3)
-26. [`sqs`](#sqs)
-27. [`stdout`](#stdout)
-28. [`switch`](#switch)
-29. [`websocket`](#websocket)
+16. [`kinesis_firehose`](#kinesis_firehose)
+17. [`mqtt`](#mqtt)
+18. [`nanomsg`](#nanomsg)
+19. [`nats`](#nats)
+20. [`nats_stream`](#nats_stream)
+21. [`nsq`](#nsq)
+22. [`redis_list`](#redis_list)
+23. [`redis_pubsub`](#redis_pubsub)
+24. [`redis_streams`](#redis_streams)
+25. [`retry`](#retry)
+26. [`s3`](#s3)
+27. [`sqs`](#sqs)
+28. [`stdout`](#stdout)
+29. [`switch`](#switch)
+30. [`websocket`](#websocket)
 
 ## `amqp`
 
@@ -572,6 +573,34 @@ kinesis:
   partition_key: ""
   region: eu-west-1
   stream: ""
+```
+
+Sends messages to a Kinesis stream.
+
+Both the `partition_key`(required) and `hash_key` (optional)
+fields can be dynamically set using function interpolations described
+[here](../config_interpolation.md#functions). When sending batched messages the
+interpolations are performed per message part.
+
+## `kinesis_firehose`
+
+``` yaml
+type: kinesis_firehose
+kinesis_firehose:
+  backoff:
+    initial_interval: ""
+    max_elapsed_time: ""
+    max_interval: ""
+  credentials:
+    id: ""
+    role: ""
+    role_external_id: ""
+    secret: ""
+    token: ""
+  delivery_stream: ""
+  endpoint: ""
+  max_retries: 0
+  region: ""
 ```
 
 Sends messages to a Kinesis stream.
