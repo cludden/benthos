@@ -518,18 +518,11 @@ func (m *MySQL) Connect() error {
 		}
 	} else {
 		start = func(c *canal.Canal) error {
-			return c.RunFrom(mysql.Position{
+			err := c.RunFrom(mysql.Position{
 				Name: pos.Log,
 				Pos:  pos.Position,
 			})
-		}
-	}
-
-	// wrap start call with error handler when latest specified
-	if m.conf.Latest {
-		start = func(c *canal.Canal) error {
-			err := start(c)
-			if err != nil && strings.Contains(err.Error(), "ERROR 1236 ") {
+			if err != nil && strings.Contains(err.Error(), "ERROR 1236 ") && m.conf.Latest {
 				return c.Run()
 			}
 			return err
