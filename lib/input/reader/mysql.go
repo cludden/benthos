@@ -91,6 +91,7 @@ type MySQL struct {
 	batchSize        int
 	bufferTimer      *time.Timer
 	bufferTimeout    time.Duration
+	c *canal.Config
 	canal            *canal.Canal
 	closed           chan error
 	internalMessages chan *message.Part
@@ -158,6 +159,7 @@ func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metric
 
 	// build binlog consumer config
 	c := canal.NewDefaultConfig()
+	m.c = c
 	c.Addr = fmt.Sprintf("%s:%d", conf.Host, conf.Port)
 	c.User = conf.Username
 	c.Password = conf.Password
@@ -172,7 +174,7 @@ func NewMySQL(conf MySQLConfig, cache types.Cache, log log.Modular, stats metric
 	}
 
 	// create binlog consumer client
-	client, err := canal.NewCanal(c)
+	client, err := canal.NewCanal(m.c)
 	if err != nil {
 		return nil, fmt.Errorf("error creating mysql binlog client: %v", err)
 	}
@@ -524,7 +526,12 @@ func (m *MySQL) Connect() error {
 			})
 			if err != nil && strings.Contains(err.Error(), "ERROR 1236 ") && m.conf.Latest {
 				c.Close()
-				return c.Run()
+				client, err := canal.NewCanal(m.c)
+				if err != nil {
+					return err
+				}
+				m.canal = client
+				return client.Run()
 			}
 			return err
 		}
