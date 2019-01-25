@@ -523,6 +523,7 @@ func (m *MySQL) Connect() error {
 				Pos:  pos.Position,
 			})
 			if err != nil && strings.Contains(err.Error(), "ERROR 1236 ") && m.conf.Latest {
+				c.Close()
 				return c.Run()
 			}
 			return err
