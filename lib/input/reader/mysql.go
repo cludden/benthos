@@ -524,6 +524,18 @@ func (m *MySQL) Connect() error {
 			})
 		}
 	}
+
+	// wrap start call with error handler when latest specified
+	if m.conf.Latest {
+		start = func(c *canal.Canal) error {
+			err := start(c)
+			if err != nil && strings.Contains(err.Error(), "ERROR 1236 ") {
+				return c.Run()
+			}
+			return err
+		}
+	}
+
 	go func() {
 		m.closed <- start(m.canal)
 		close(m.ack)
